@@ -1,0 +1,76 @@
+# ─── SECRETS & ENVIRONMENT ────────────────────────────────────────────────────
+# NEVER commit real credentials. Use .env.example with placeholder values only.
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+.env.staging
+.env.test
+
+
+# ─── NODE ─────────────────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+.npm/
+
+# ─── BUILD OUTPUT ─────────────────────────────────────────────────────────────
+dist/
+build/
+out/
+
+# ─── PRISMA ───────────────────────────────────────────────────────────────────
+# Generated client — rebuilt via `prisma generate`
+# (keep schema.prisma and migrations — those ARE committed)
+prisma/generated/
+
+# ─── TYPESCRIPT ───────────────────────────────────────────────────────────────
+*.tsbuildinfo
+tsconfig.build.tsbuildinfo
+
+# ─── TEST & COVERAGE ──────────────────────────────────────────────────────────
+coverage/
+.nyc_output/
+test-results/
+jest-stash/
+
+# ─── LOGS ─────────────────────────────────────────────────────────────────────
+logs/
+*.log
+*.log.*
+
+# ─── OS & EDITOR ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json.example
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# ─── MISC TEMP FILES ──────────────────────────────────────────────────────────
+*.tmp
+*.patch
+.tmp.*
+.tmp/
+tmp/
+temp/
+
+# ─── PACKAGE MANAGER LOCKS (keep one, ignore others) ─────────────────────────
+# Commit package-lock.json (npm). Ignore yarn/pnpm if not used.
+yarn.lock
+pnpm-lock.yaml
+
+# ─── RUNTIME ──────────────────────────────────────────────────────────────────
+.pid
+.pid.lock

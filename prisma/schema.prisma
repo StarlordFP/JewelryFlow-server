@@ -1,0 +1,801 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── ENUMS ────────────────────────────────────────────────────────────────────
+
+enum SupplierType {
+  TRADE    // gives raw metal, receives finished items back
+  DIRECT   // sells finished items directly to shop
+}
+
+enum PurchaseOrderStatus {
+  PENDING
+  RECEIVED
+  CANCELLED
+}
+
+enum TradeStatus {
+  PENDING
+  COMPLETED
+  CANCELLED
+}
+
+enum StockItemOrigin {
+  PURCHASED
+  KARIGAR
+  TRADE
+}
+
+enum StockItemStatus {
+  IN_STOCK
+  RESERVED
+  SOLD
+  RETURNED
+  SCRAPPED
+}
+
+enum JyalaChargeType {
+  PERCENTAGE
+  FLAT
+}
+
+enum TransactionType {
+  SELL
+  RETURN
+  EXCHANGE
+  BUY_BACK
+  OLD_GOLD
+}
+
+enum PaymentMethod {
+  CASH
+  ONLINE   // eSewa, Khalti
+  CHEQUE
+}
+
+enum ProductionOrderStatus {
+  OPEN
+  COMPLETED
+  CANCELLED
+}
+
+enum DisputeStatus {
+  PENDING
+  RESOLVED
+}
+
+// ─── PERMISSION ───────────────────────────────────────────────────────────────
+
+model Permission {
+  id          String  @id @default(cuid())
+  name        String  @unique
+  description String?
+  module      String
+
+  rolePermissions RolePermission[]
+
+  @@map("permissions")
+}
+
+// ─── ROLE ─────────────────────────────────────────────────────────────────────
+
+model Role {
+  id          String  @id @default(cuid())
+  name        String  @unique
+  description String?
+  isActive    Boolean @default(true)
+
+  rolePermissions RolePermission[]
+  userRoles       UserRole[]
+
+  @@map("roles")
+}
+
+// ─── ROLE PERMISSION ──────────────────────────────────────────────────────────
+
+model RolePermission {
+  id           String @id @default(cuid())
+  roleId       String
+  permissionId String
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+// ─── USER ─────────────────────────────────────────────────────────────────────
+
+model User {
+  id               String    @id @default(cuid())
+  name             String
+  email            String    @unique
+  passwordHash     String
+  isActive         Boolean   @default(true)
+  emailVerified    Boolean   @default(true)
+  emailVerifyToken String?   @unique
+  emailVerifyExpiry DateTime?
+  resetToken       String?   @unique
+  resetTokenExpiry DateTime?
+  refreshTokenHash String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  userRoles        UserRole[]
+  trades           Trade[]         @relation("TradeCreatedBy")
+  dailyRates       DailyRate[]     @relation("RateUpdatedBy")
+  transactions     Transaction[]   @relation("TransactionCreatedBy")
+  purchaseOrders   PurchaseOrder[] @relation("POCreatedBy")
+
+  @@map("users")
+}
+
+// ─── USER ROLE ────────────────────────────────────────────────────────────────
+
+model UserRole {
+  id         String   @id @default(cuid())
+  userId     String
+  roleId     String
+  assignedAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId])
+  @@map("user_roles")
+}
+
+// ─── METAL TYPE ───────────────────────────────────────────────────────────────
+
+model MetalType {
+  id           String  @id @default(cuid())
+  name         String  @unique
+  purityFactor Decimal @db.Decimal(5, 4)
+  isActive     Boolean @default(true)
+
+  dailyRates        DailyRate[]
+  stockItems        StockItem[]
+  trades            Trade[]            @relation("GivenMetal")
+  jyalaRules        JyalaRule[]
+  productionIssues  ProductionIssue[]
+  karigarPayments   KarigarPayment[]   @relation("PaymentMetal")
+
+  @@map("metal_types")
+}
+
+// ─── DAILY RATE ───────────────────────────────────────────────────────────────
+// Set every morning by owner — old rate auto-expires (isCurrent = false)
+// Both sell and buy rates stored — shown on stock entry, bill uses today's rate
+
+model DailyRate {
+  id              String   @id @default(cuid())
+  metalTypeId     String
+
+  // Sell rate — shop sells jewelry at this rate (higher)
+  sellRatePerGram Decimal  @db.Decimal(12, 2)
+  sellRatePerTola Decimal  @db.Decimal(12, 2)
+  sellRatePerLal  Decimal  @db.Decimal(12, 2)
+
+  // Buy rate — shop buys back gold at this rate (lower)
+  buyRatePerGram  Decimal  @db.Decimal(12, 2)
+  buyRatePerTola  Decimal  @db.Decimal(12, 2)
+  buyRatePerLal   Decimal  @db.Decimal(12, 2)
+
+  effectiveDate   DateTime @default(now())
+  isCurrent       Boolean  @default(true)
+  updatedByUserId String
+
+  metalType    MetalType     @relation(fields: [metalTypeId], references: [id])
+  updatedBy    User          @relation("RateUpdatedBy", fields: [updatedByUserId], references: [id])
+  transactions Transaction[]
+  // Rate at time of stock entry — stored on StockItem for history view
+  stockItems   StockItem[]   @relation("StockEntryRate")
+
+  @@map("daily_rates")
+}
+
+// ─── ITEM CATEGORY ────────────────────────────────────────────────────────────
+
+model ItemCategory {
+  id       String  @id @default(cuid())
+  name     String  @unique
+  isActive Boolean @default(true)
+
+  stockItems    StockItem[]
+  jyalaRules    JyalaRule[]
+  jertyBrackets JertyBracket[]
+
+  @@map("item_categories")
+}
+
+// ─── JYALA RULE ───────────────────────────────────────────────────────────────
+
+model JyalaRule {
+  id          String          @id @default(cuid())
+  categoryId  String
+  metalTypeId String
+  chargeType  JyalaChargeType
+  minValue    Decimal         @db.Decimal(10, 2)
+  maxValue    Decimal         @db.Decimal(10, 2)
+  isActive    Boolean         @default(true)
+
+  category  ItemCategory @relation(fields: [categoryId], references: [id])
+  metalType MetalType    @relation(fields: [metalTypeId], references: [id])
+
+  @@unique([categoryId, metalTypeId])
+  @@map("jyala_rules")
+}
+
+// ─── JERTY BRACKET ────────────────────────────────────────────────────────────
+
+model JertyBracket {
+  id            String  @id @default(cuid())
+  categoryId    String
+  minWeightGram Decimal @db.Decimal(10, 4)
+  maxWeightGram Decimal @db.Decimal(10, 4)
+  jertyGram     Decimal @db.Decimal(10, 4)
+  isActive      Boolean @default(true)
+
+  category ItemCategory @relation(fields: [categoryId], references: [id])
+
+  @@map("jerty_brackets")
+}
+
+// ─── ADDON TYPE ───────────────────────────────────────────────────────────────
+
+model AddonType {
+  id          String  @id @default(cuid())
+  name        String  @unique
+  description String?
+  isActive    Boolean @default(true)
+
+  addonJyalaBrackets AddonJyalaBracket[]
+  stockItemAddons    StockItemAddon[]
+
+  @@map("addon_types")
+}
+
+// ─── ADDON JYALA BRACKET ─────────────────────────────────────────────────────
+// Count-based jyala suggestion per addon type
+// e.g. 1-3 diamonds = NPR 500/piece, 4-6 diamonds = NPR 800/piece
+// Shopkeeper can override the final amount
+
+model AddonJyalaBracket {
+  id           String  @id @default(cuid())
+  addonTypeId  String
+  minCount     Int
+  maxCount     Int
+  jyalaPerUnit Decimal @db.Decimal(10, 2)
+  isActive     Boolean @default(true)
+
+  addonType AddonType @relation(fields: [addonTypeId], references: [id])
+
+  @@map("addon_jyala_brackets")
+}
+
+// ─── LUXURY TAX RULE ──────────────────────────────────────────────────────────
+
+model LuxuryTaxRule {
+  id            String   @id @default(cuid())
+  rate          Decimal  @db.Decimal(5, 4) // 0.02 = 2%
+  appliesTo     String   // "GOLD"
+  effectiveDate DateTime
+  isActive      Boolean  @default(true)
+
+  @@map("luxury_tax_rules")
+}
+
+// ─── VAT RULE ─────────────────────────────────────────────────────────────────
+
+model VatRule {
+  id            String   @id @default(cuid())
+  rate          Decimal  @db.Decimal(5, 4) // 0.13 = 13%
+  appliesTo     String   // "JYALA"
+  effectiveDate DateTime
+  isActive      Boolean  @default(true)
+
+  @@map("vat_rules")
+}
+
+// ─── SUPPLIER ─────────────────────────────────────────────────────────────────
+// Merged TradeParty + Supplier into one entity
+// TRADE = gives raw metal, receives finished items back
+// DIRECT = sells finished items directly to shop
+
+model Supplier {
+  id           String       @id @default(cuid())
+  name         String
+  phone        String?
+  address      String?
+  supplierType SupplierType @default(DIRECT)
+  isActive     Boolean      @default(true)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  trades         Trade[]
+  purchaseOrders PurchaseOrder[]
+
+  @@map("suppliers")
+}
+
+// ─── PURCHASE ORDER ───────────────────────────────────────────────────────────
+// Used when shop buys finished items directly from a DIRECT supplier
+
+model PurchaseOrder {
+  id              String              @id @default(cuid())
+  supplierId      String
+  createdByUserId String
+  totalNpr        Decimal             @db.Decimal(12, 2)
+  status          PurchaseOrderStatus @default(PENDING)
+  notes           String?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  supplier   Supplier            @relation(fields: [supplierId], references: [id])
+  createdBy  User                @relation("POCreatedBy", fields: [createdByUserId], references: [id])
+  lines      PurchaseOrderLine[]
+
+  @@map("purchase_orders")
+}
+
+// ─── PURCHASE ORDER LINE ──────────────────────────────────────────────────────
+// Each line = one stock item to be received
+// Weight/jerty/jyala pre-filled from order but flexible — supplier may vary
+
+model PurchaseOrderLine {
+  id              String  @id @default(cuid())
+  purchaseOrderId String
+
+  // Item details — pre-filled but editable on receipt
+  description     String
+  categoryId      String?
+  metalTypeId     String?
+  karat           Int?
+
+  // Weight — all three units stored, flexible input
+  grossWeightGram Decimal  @db.Decimal(10, 4)
+  grossWeightTola Decimal  @db.Decimal(10, 4)
+  grossWeightLal  Decimal  @db.Decimal(10, 4)
+
+  // Pricing — flexible, shopkeeper sets on receipt
+  jertyGram       Decimal  @default(0) @db.Decimal(10, 4)
+  jertyTola       Decimal  @default(0) @db.Decimal(10, 4)
+  jertyLal        Decimal  @default(0) @db.Decimal(10, 4)
+  priceNpr        Decimal  @db.Decimal(12, 2)
+
+  // Back-reference to StockItem created when PO is RECEIVED
+  stockItemId     String?  @unique
+
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  stockItem     StockItem?    @relation(fields: [stockItemId], references: [id])
+
+  @@map("purchase_order_lines")
+}
+
+// ─── STOCK ITEM ───────────────────────────────────────────────────────────────
+
+model StockItem {
+  id               String          @id @default(cuid())
+  sku              String          @unique
+  name             String?
+  origin           StockItemOrigin
+  categoryId       String
+  metalTypeId      String?
+  karat            Int?
+
+  // Rate at time of stock entry — for history display
+  // Bill always uses today's rate, but this shows what rate was when item was added
+  entryRateId      String?
+
+  // Gross weight
+  grossWeightGram  Decimal         @db.Decimal(10, 4)
+  grossWeightTola  Decimal         @db.Decimal(10, 4)
+  grossWeightLal   Decimal         @db.Decimal(10, 4)
+
+  // Jerty — mutable, overridable at bill time
+  jertyGram        Decimal         @default(0) @db.Decimal(10, 4)
+  jertyTola        Decimal         @default(0) @db.Decimal(10, 4)
+  jertyLal         Decimal         @default(0) @db.Decimal(10, 4)
+
+  // Jyala breakdown — owner only, customer sees total only
+  makingChargeNpr  Decimal         @default(0) @db.Decimal(12, 2)
+  stoneChargeNpr   Decimal         @default(0) @db.Decimal(12, 2)
+  motiChargeNpr    Decimal         @default(0) @db.Decimal(12, 2)
+  malaChargeNpr    Decimal         @default(0) @db.Decimal(12, 2)
+  otherChargeNpr   Decimal         @default(0) @db.Decimal(12, 2)
+  totalJyalaNpr    Decimal         @default(0) @db.Decimal(12, 2)
+
+  // Tax toggles
+  applyLuxuryTax   Boolean         @default(false)
+  applyVat         Boolean         @default(false)
+
+  status           StockItemStatus @default(IN_STOCK)
+  photoUrl         String?
+  notes            String?
+
+  // Origin back-references
+  tradeItemId      String?         @unique
+  productionItemId String?         @unique
+
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  category             ItemCategory       @relation(fields: [categoryId], references: [id])
+  metalType            MetalType?         @relation(fields: [metalTypeId], references: [id])
+  entryRate            DailyRate?         @relation("StockEntryRate", fields: [entryRateId], references: [id])
+  tradeItem            TradeItem?         @relation(fields: [tradeItemId], references: [id])
+  productionItem       ProductionItem?    @relation(fields: [productionItemId], references: [id])
+  purchaseOrderLine    PurchaseOrderLine?
+  addons               StockItemAddon[]
+  transactionLines     TransactionLine[]
+
+  @@map("stock_items")
+}
+
+// ─── STOCK ITEM ADDON ─────────────────────────────────────────────────────────
+
+model StockItemAddon {
+  id           String  @id @default(cuid())
+  stockItemId  String
+  addonTypeId  String
+  quantity     Int     @default(1)
+  // Suggested from AddonJyalaBracket — shopkeeper can override
+  valuationNpr Decimal @db.Decimal(12, 2)
+  notes        String?
+
+  stockItem StockItem @relation(fields: [stockItemId], references: [id], onDelete: Cascade)
+  addonType AddonType @relation(fields: [addonTypeId], references: [id])
+
+  @@map("stock_item_addons")
+}
+
+// ─── TRADE ────────────────────────────────────────────────────────────────────
+// TRADE-type supplier gives raw metal, shop returns finished items
+
+model Trade {
+  id                 String      @id @default(cuid())
+  supplierId         String
+  createdByUserId    String
+  givenWeightGram    Decimal     @db.Decimal(10, 4)
+  givenWeightTola    Decimal     @db.Decimal(10, 4)
+  givenWeightLal     Decimal     @db.Decimal(10, 4)
+  givenMetalTypeId   String
+  rateAtTradePerGram Decimal     @db.Decimal(12, 2)
+  cashAdjustment     Decimal     @default(0) @db.Decimal(12, 2)
+  status             TradeStatus @default(PENDING)
+  notes              String?
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+
+  supplier   Supplier    @relation(fields: [supplierId], references: [id])
+  createdBy  User        @relation("TradeCreatedBy", fields: [createdByUserId], references: [id])
+  givenMetal MetalType   @relation("GivenMetal", fields: [givenMetalTypeId], references: [id])
+  tradeItems TradeItem[]
+
+  @@map("trades")
+}
+
+// ─── TRADE ITEM ───────────────────────────────────────────────────────────────
+
+model TradeItem {
+  id              String   @id @default(cuid())
+  tradeId         String
+  description     String
+  grossWeightGram Decimal  @db.Decimal(10, 4)
+  grossWeightTola Decimal  @db.Decimal(10, 4)
+  grossWeightLal  Decimal  @db.Decimal(10, 4)
+  createdAt       DateTime @default(now())
+
+  trade     Trade      @relation(fields: [tradeId], references: [id], onDelete: Cascade)
+  stockItem StockItem?
+
+  @@map("trade_items")
+}
+
+// ─── KARIGAR ──────────────────────────────────────────────────────────────────
+// Craftsman who makes jewelry from raw metal issued by the shop
+
+model Karigar {
+  id           String  @id @default(cuid())
+  name         String
+  phone        String?
+  address      String?
+  // Acceptable wastage % — excess goes to dispute
+  tolerancePct Decimal @db.Decimal(5, 2)
+  isActive     Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  productionOrders ProductionOrder[]
+  payments         KarigarPayment[]
+  disputes         KarigarDispute[]
+
+  @@map("karigars")
+}
+
+// ─── PRODUCTION ORDER ─────────────────────────────────────────────────────────
+
+model ProductionOrder {
+  id           String                @id @default(cuid())
+  karigarId    String
+  // Override tolerance for this specific order
+  tolerancePct Decimal               @db.Decimal(5, 2)
+  status       ProductionOrderStatus @default(OPEN)
+  notes        String?
+  createdAt    DateTime              @default(now())
+  updatedAt    DateTime              @updatedAt
+
+  karigar          Karigar           @relation(fields: [karigarId], references: [id])
+  productionIssues ProductionIssue[]
+  productionReturns ProductionReturn[]
+  payments         KarigarPayment[]
+  disputes         KarigarDispute[]
+
+  @@map("production_orders")
+}
+
+// ─── PRODUCTION ISSUE ─────────────────────────────────────────────────────────
+// Raw metal issued to karigar — all three units stored
+
+model ProductionIssue {
+  id              String   @id @default(cuid())
+  productionOrderId String
+  metalTypeId     String
+
+  issuedWeightGram Decimal @db.Decimal(10, 4)
+  issuedWeightTola Decimal @db.Decimal(10, 4)
+  issuedWeightLal  Decimal @db.Decimal(10, 4)
+
+  // Rate at time of issue — for valuation
+  rateAtIssuePerGram Decimal  @db.Decimal(12, 2)
+  issuedAt           DateTime @default(now())
+
+  productionOrder  ProductionOrder   @relation(fields: [productionOrderId], references: [id])
+  metalType        MetalType         @relation(fields: [metalTypeId], references: [id])
+  productionReturns ProductionReturn[]
+
+  @@map("production_issues")
+}
+
+// ─── PRODUCTION RETURN ────────────────────────────────────────────────────────
+// Finished items returned by karigar
+// kharchar = actual wastage = issuedWeight - returnedWeight
+
+model ProductionReturn {
+  id                String   @id @default(cuid())
+  productionOrderId String
+  productionIssueId String
+
+  returnedWeightGram Decimal @db.Decimal(10, 4)
+  returnedWeightTola Decimal @db.Decimal(10, 4)
+  returnedWeightLal  Decimal @db.Decimal(10, 4)
+
+  // kharchar = wastage weight
+  kharcharGram     Decimal  @db.Decimal(10, 4)
+  kharcharTola     Decimal  @db.Decimal(10, 4)
+  kharcharLal      Decimal  @db.Decimal(10, 4)
+
+  withinTolerance  Boolean  @default(true)
+  returnedAt       DateTime @default(now())
+
+  productionOrder  ProductionOrder   @relation(fields: [productionOrderId], references: [id])
+  productionIssue  ProductionIssue   @relation(fields: [productionIssueId], references: [id])
+  productionItems  ProductionItem[]
+
+  @@map("production_returns")
+}
+
+// ─── PRODUCTION ITEM ──────────────────────────────────────────────────────────
+// Each finished piece returned — links to StockItem (origin=KARIGAR)
+
+model ProductionItem {
+  id                 String  @id @default(cuid())
+  productionReturnId String
+  description        String
+
+  grossWeightGram    Decimal @db.Decimal(10, 4)
+  grossWeightTola    Decimal @db.Decimal(10, 4)
+  grossWeightLal     Decimal @db.Decimal(10, 4)
+
+  productionReturn ProductionReturn @relation(fields: [productionReturnId], references: [id])
+  stockItem        StockItem?
+
+  @@map("production_items")
+}
+
+// ─── KARIGAR PAYMENT ──────────────────────────────────────────────────────────
+// Payment to karigar — can be cash, metal, or both in one record
+// If a dispute deduction applies, pendingDeductionNpr is applied here
+
+model KarigarPayment {
+  id                String   @id @default(cuid())
+  karigarId         String
+  productionOrderId String
+
+  // Cash component (optional)
+  cashAmountNpr     Decimal? @db.Decimal(12, 2)
+
+  // Metal component (optional)
+  metalWeightGram   Decimal? @db.Decimal(10, 4)
+  metalWeightTola   Decimal? @db.Decimal(10, 4)
+  metalWeightLal    Decimal? @db.Decimal(10, 4)
+  metalTypeId       String?
+
+  // Dispute deduction applied in this payment (owner decides amount)
+  deductionNpr      Decimal  @default(0) @db.Decimal(12, 2)
+  deductionNotes    String?
+
+  paidAt            DateTime @default(now())
+  notes             String?
+
+  karigar         Karigar         @relation(fields: [karigarId], references: [id])
+  productionOrder ProductionOrder @relation(fields: [productionOrderId], references: [id])
+  metalType       MetalType?      @relation("PaymentMetal", fields: [metalTypeId], references: [id])
+
+  @@map("karigar_payments")
+}
+
+// ─── KARIGAR DISPUTE ──────────────────────────────────────────────────────────
+// Created when wastage exceeds tolerance
+// Owner decides deduction amount manually — applied in next KarigarPayment
+
+model KarigarDispute {
+  id                String        @id @default(cuid())
+  karigarId         String
+  productionOrderId String
+
+  // Excess wastage details
+  excessWeightGram  Decimal       @db.Decimal(10, 4)
+  excessWeightTola  Decimal       @db.Decimal(10, 4)
+  excessWeightLal   Decimal       @db.Decimal(10, 4)
+
+  // Owner decides how much to deduct
+  deductionNpr      Decimal?      @db.Decimal(12, 2)
+  status            DisputeStatus @default(PENDING)
+  resolutionNotes   String?
+  resolvedAt        DateTime?
+
+  createdAt         DateTime      @default(now())
+
+  karigar         Karigar         @relation(fields: [karigarId], references: [id])
+  productionOrder ProductionOrder @relation(fields: [productionOrderId], references: [id])
+
+  @@map("karigar_disputes")
+}
+
+// ─── CUSTOMER ─────────────────────────────────────────────────────────────────
+
+model Customer {
+  id        String   @id @default(cuid())
+  name      String
+  phoneHash String?  @unique
+  phoneHint String?
+  address   String?
+  notes     String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  transactions   Transaction[]
+  buybackRecords BuybackRecord[]
+
+  @@map("customers")
+}
+
+// ─── TRANSACTION ──────────────────────────────────────────────────────────────
+
+model Transaction {
+  id              String          @id @default(cuid())
+  billNumber      String          @unique
+  txType          TransactionType
+  customerId      String?
+  createdByUserId String?
+  dailyRateId     String?
+  relatedTxId     String?
+  exchangeGroupId String?
+  paymentMethod   PaymentMethod   @default(CASH)
+  subTotalNpr     Decimal         @db.Decimal(12, 2)
+  discountNpr     Decimal         @default(0) @db.Decimal(12, 2)
+  grandTotalNpr   Decimal         @db.Decimal(12, 2)
+  paidAmountNpr   Decimal         @default(0) @db.Decimal(12, 2)
+  balanceNpr      Decimal         @default(0) @db.Decimal(12, 2)
+  returnDeadline  DateTime?
+  notes           String?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  customer       Customer?         @relation(fields: [customerId], references: [id])
+  createdBy      User?             @relation("TransactionCreatedBy", fields: [createdByUserId], references: [id])
+  dailyRate      DailyRate?        @relation(fields: [dailyRateId], references: [id])
+  relatedTx      Transaction?      @relation("RelatedTx", fields: [relatedTxId], references: [id])
+  relatedToTx    Transaction[]     @relation("RelatedTx")
+  lines          TransactionLine[]
+  buybackRecord  BuybackRecord?
+  payments       PaymentRecord[]
+
+  @@map("transactions")
+}
+
+// ─── TRANSACTION LINE ─────────────────────────────────────────────────────────
+
+model TransactionLine {
+  id              String  @id @default(cuid())
+  transactionId   String
+  stockItemId     String
+  grossWeightGram Decimal @db.Decimal(10, 4)
+  jertyGram       Decimal @db.Decimal(10, 4)
+  billableGram    Decimal @db.Decimal(10, 4)
+  ratePerGram     Decimal @db.Decimal(12, 2)
+  metalValueNpr   Decimal @db.Decimal(12, 2)
+  jyalaNpr        Decimal @db.Decimal(12, 2)
+  makingChargeNpr Decimal @default(0) @db.Decimal(12, 2)
+  stoneChargeNpr  Decimal @default(0) @db.Decimal(12, 2)
+  motiChargeNpr   Decimal @default(0) @db.Decimal(12, 2)
+  malaChargeNpr   Decimal @default(0) @db.Decimal(12, 2)
+  otherChargeNpr  Decimal @default(0) @db.Decimal(12, 2)
+  luxuryTaxNpr    Decimal @db.Decimal(12, 2)
+  vatNpr          Decimal @db.Decimal(12, 2)
+  addonValueNpr   Decimal @db.Decimal(12, 2)
+  lineTotalNpr    Decimal @db.Decimal(12, 2)
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  stockItem   StockItem   @relation(fields: [stockItemId], references: [id])
+
+  @@map("transaction_lines")
+}
+
+// ─── PAYMENT RECORD ───────────────────────────────────────────────────────────
+
+model PaymentRecord {
+  id            String        @id @default(cuid())
+  transactionId String
+  amountNpr     Decimal       @db.Decimal(12, 2)
+  method        PaymentMethod
+  reference     String?
+  paidAt        DateTime      @default(now())
+  notes         String?
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@map("payment_records")
+}
+
+// ─── BUYBACK RECORD ───────────────────────────────────────────────────────────
+
+model BuybackRecord {
+  id              String  @id @default(cuid())
+  transactionId   String  @unique
+  customerId      String?
+  relatedSaleTxId String?
+  metalWeightGram Decimal @db.Decimal(10, 4)
+  metalWeightTola Decimal @db.Decimal(10, 4)
+  metalWeightLal  Decimal @db.Decimal(10, 4)
+  buyRatePerGram  Decimal @db.Decimal(12, 2)
+  totalNpr        Decimal @db.Decimal(12, 2)
+
+  transaction Transaction @relation(fields: [transactionId], references: [id])
+  customer    Customer?   @relation(fields: [customerId], references: [id])
+
+  @@map("buyback_records")
+}
+
+// ─── CONVERSATION LOG ─────────────────────────────────────────────────────────
+
+model ConversationLog {
+  id        String   @id @default(cuid())
+  userId    String
+  role      String
+  content   String
+  toolName  String?
+  createdAt DateTime @default(now())
+
+  @@map("conversation_logs")
+}
