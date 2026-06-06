@@ -6,6 +6,7 @@ import {
   IsArray,
   MinLength,
   MaxLength,
+  IsNotEmpty,
 } from 'class-validator';
 
 // ─── AUTH ─────────────────────────────────────────────────────────────────────
@@ -24,7 +25,12 @@ export class LoginDto {
 export class RefreshTokenDto {
   /** Refresh token received from login response */
   @IsString()
-  refreshToken!: string;
+  @IsNotEmpty()
+  userId: string;
+
+  @IsString()
+  @IsNotEmpty()
+  refreshToken: string;
 }
 
 export class ForgotPasswordDto {

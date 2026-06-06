@@ -258,8 +258,12 @@ export class KarigarService {
     const returnedW = WeightUtil.from(dto.returnedWeight.value, dto.returnedWeight.unit);
     const issuedGram = Number(issue.issuedWeightGram);
 
+    if (returnedW.gram > issuedGram) {
+      throw new BadRequestException('Returned weight cannot exceed issued weight');
+    }
+
     // Calculate kharchar (wastage)
-    const kharcharGram = Math.max(0, issuedGram - returnedW.gram);
+    const kharcharGram = issuedGram - returnedW.gram;
     const kharcharW    = WeightUtil.fromGram(kharcharGram);
 
     // Check tolerance
@@ -500,8 +504,11 @@ export class KarigarService {
   }
 
   private async getDefaultCategoryId(tx: any): Promise<string> {
-    let cat = await tx.itemCategory.findFirst({ where: { name: 'Uncategorised' } });
-    if (!cat) cat = await tx.itemCategory.create({ data: { name: 'Uncategorised' } });
-    return cat.id;
-  }
+  const cat = await tx.itemCategory.upsert({
+    where:  { name: 'Uncategorised' },
+    update: {},                          // already exists — do nothing
+    create: { name: 'Uncategorised' },  // doesn't exist — create it
+  });
+  return cat.id;
+}
 }

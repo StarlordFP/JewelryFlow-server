@@ -11,9 +11,8 @@
  * 1 gram = 0.08573 Tola
  */
 
-const GRAMS_PER_TOLA = 11.664;
-const GRAMS_PER_LAL  = 11.664 / 100; // 0.11664
-const LAL_PER_TOLA   = 100;
+import { GRAMS_PER_TOLA, GRAMS_PER_LAL } from '../constants/weight.constants';
+
 
 export type WeightUnit = 'gram' | 'tola' | 'lal';
 

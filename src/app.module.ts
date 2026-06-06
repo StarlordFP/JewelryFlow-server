@@ -1,8 +1,9 @@
 import { Module } from '@nestjs/common';
-import { APP_FILTER, APP_INTERCEPTOR } from '@nestjs/core';
+import { APP_FILTER, APP_INTERCEPTOR, APP_GUARD } from '@nestjs/core';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { PassportModule } from '@nestjs/passport';
 import { JwtModule } from '@nestjs/jwt';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { AuthModule } from './auth/auth.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { StockModule } from './stock/stock.module';
@@ -14,22 +15,27 @@ import { PurchaseModule } from './purchase/purchase.module';
 import { KarigarModule } from './karigar/karigar.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
+import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
 
+    ThrottlerModule.forRoot([
+      {
+        name:  'default',
+        ttl:   60_000,
+        limit: 100,
+      },
+    ]),
+
     PassportModule.register({ defaultStrategy: 'jwt' }),
 
-    // ── JwtModule.registerAsync — waits for ConfigModule to load ────────────
-    // Previously used JwtModule.register({ secret: process.env.JWT_SECRET })
-    // which reads the env var at module load time, before ConfigModule has
-    // populated process.env — risking secret being undefined in some deploys.
     JwtModule.registerAsync({
-      imports: [ConfigModule],
-      inject: [ConfigService],
+      imports:    [ConfigModule],
+      inject:     [ConfigService],
       useFactory: (config: ConfigService) => ({
-        secret: config.getOrThrow<string>('JWT_SECRET'),
+        secret:      config.getOrThrow<string>('JWT_SECRET'),
         signOptions: { expiresIn: '8h' },
       }),
     }),
@@ -46,8 +52,14 @@ import { TransformInterceptor } from './common/interceptors/transform.intercepto
   ],
 
   providers: [
-    { provide: APP_FILTER, useClass: HttpExceptionFilter },
-    { provide: APP_INTERCEPTOR, useClass: TransformInterceptor },
+    { provide: APP_FILTER,       useClass: HttpExceptionFilter },
+    { provide: APP_INTERCEPTOR,  useClass: TransformInterceptor },
+
+    // ── Global guards — order matters ────────────────────────────────────────
+    // ThrottlerGuard runs first — rate limit before auth
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    // JwtAuthGuard runs second — auth on everything unless @Public()
+    { provide: APP_GUARD, useClass: JwtAuthGuard },
   ],
 })
 export class AppModule {}

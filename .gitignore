@@ -27,6 +27,8 @@ out/
 # Generated client — rebuilt via `prisma generate`
 # (keep schema.prisma and migrations — those ARE committed)
 prisma/generated/
+*.db
+*.db-journal
 
 # ─── TYPESCRIPT ───────────────────────────────────────────────────────────────
 *.tsbuildinfo

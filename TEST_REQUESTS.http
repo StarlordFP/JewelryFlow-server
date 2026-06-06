@@ -1,0 +1,530 @@
+### JewelryFlow ERP - REST Client Testing File
+### Install "REST Client" extension in VS Code to use this file
+
+@baseUrl = http://localhost:3000/api/v1
+@token = YOUR_JWT_TOKEN_HERE
+
+###############################################################################
+# 1. RATES MODULE TESTS
+###############################################################################
+
+### 1.1 Set Daily Rate - GOLD
+POST {{baseUrl}}/rates
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "metalType": "GOLD",
+  "buyRate": 65000,
+  "sellRate": 66000
+}
+
+### 1.2 Set Daily Rate - SILVER
+POST {{baseUrl}}/rates
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "metalType": "SILVER",
+  "buyRate": 800,
+  "sellRate": 850
+}
+
+### 1.3 Set Daily Rate - PLATINUM
+POST {{baseUrl}}/rates
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "metalType": "PLATINUM",
+  "buyRate": 3500,
+  "sellRate": 3700
+}
+
+### 1.4 Get Today's Rates
+GET {{baseUrl}}/rates/today
+Authorization: Bearer {{token}}
+
+###############################################################################
+# 2. STOCK/INVENTORY TESTS
+###############################################################################
+
+### 2.1 Add Stock Item - Gold Ring
+POST {{baseUrl}}/stock
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "sku": "AUR-001",
+  "name": "Gold Ring - Classic",
+  "description": "22K gold ring with smooth finish",
+  "metalType": "GOLD",
+  "weight": {
+    "gram": 5.5,
+    "tola": 0.65,
+    "rattiMassi": 0
+  },
+  "origin": "PURCHASED",
+  "quantity": 10,
+  "jerty": 500,
+  "jyala": {
+    "type": "PERCENTAGE",
+    "value": 15
+  },
+  "supplier": "Local Gold Trader"
+}
+
+### 2.2 Add Stock Item - Silver Pendant
+POST {{baseUrl}}/stock
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "sku": "CANDI-001",
+  "name": "Silver Pendant - Moon Design",
+  "description": "925 silver pendant",
+  "metalType": "SILVER",
+  "weight": {
+    "gram": 3.2,
+    "tola": 0.38,
+    "rattiMassi": 0
+  },
+  "origin": "PURCHASED",
+  "quantity": 15,
+  "jerty": 200,
+  "jyala": {
+    "type": "FLAT",
+    "value": 100
+  },
+  "supplier": "Silver Imports"
+}
+
+### 2.3 Add Stock Item - Platinum Earrings
+POST {{baseUrl}}/stock
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "sku": "PLAT-001",
+  "name": "Platinum Earrings - Diamond Set",
+  "description": "Pure platinum earrings",
+  "metalType": "PLATINUM",
+  "weight": {
+    "gram": 8.0,
+    "tola": 0.94,
+    "rattiMassi": 0
+  },
+  "origin": "PURCHASED",
+  "quantity": 5,
+  "jerty": 1500,
+  "jyala": {
+    "type": "PERCENTAGE",
+    "value": 20
+  },
+  "supplier": "Premium Metals Co"
+}
+
+### 2.4 Get All Stock Items
+GET {{baseUrl}}/stock?status=IN_STOCK&limit=20&offset=0
+Authorization: Bearer {{token}}
+
+### 2.5 Price Preview for Stock Item
+# Note: Replace {stockId} with actual ID from previous response
+POST {{baseUrl}}/stock/{stockId}/price-preview
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "customJerty": 600,
+  "customJyala": {
+    "type": "PERCENTAGE",
+    "value": 20
+  }
+}
+
+###############################################################################
+# 3. PURCHASE MODULE TESTS
+###############################################################################
+
+### 3.1 Create Supplier - Trade Type
+POST {{baseUrl}}/suppliers
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "name": "Prime Gold Suppliers",
+  "phone": "+977-1-4123456",
+  "email": "supplier@goldprime.com",
+  "address": "Thamel, Kathmandu",
+  "supplierType": "TRADE",
+  "creditLimit": 500000,
+  "paymentTerms": "NET_30"
+}
+
+### 3.2 Create Supplier - Direct Type
+POST {{baseUrl}}/suppliers
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "name": "Silver Direct Ltd",
+  "phone": "+977-1-5234567",
+  "email": "sales@silverdirect.com",
+  "address": "Durbar Marg, Kathmandu",
+  "supplierType": "DIRECT",
+  "creditLimit": 300000,
+  "paymentTerms": "COD"
+}
+
+### 3.3 Get All Suppliers
+GET {{baseUrl}}/suppliers?status=ACTIVE&limit=20
+Authorization: Bearer {{token}}
+
+### 3.4 Get Supplier Details
+# Note: Replace {supplierId} with actual ID
+GET {{baseUrl}}/suppliers/{supplierId}
+Authorization: Bearer {{token}}
+
+### 3.5 Create Purchase Order
+# Note: Replace {supplierId} with actual supplier ID
+POST {{baseUrl}}/purchase-orders
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "supplierId": "{supplierId}",
+  "items": [
+    {
+      "sku": "AUR-001",
+      "quantity": 20,
+      "unitPrice": 358750,
+      "metalType": "GOLD"
+    },
+    {
+      "sku": "CANDI-001",
+      "quantity": 15,
+      "unitPrice": 2560,
+      "metalType": "SILVER"
+    }
+  ],
+  "estimatedDelivery": "2026-06-15",
+  "notes": "Regular stock replenishment"
+}
+
+### 3.6 Get Purchase Orders
+GET {{baseUrl}}/purchase-orders?status=PENDING&limit=20
+Authorization: Bearer {{token}}
+
+### 3.7 Receive Purchase Order
+# Note: Replace {poId} with actual PO ID
+POST {{baseUrl}}/purchase-orders/{poId}/receive
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "receivedItems": [
+    {
+      "sku": "AUR-001",
+      "receivedQuantity": 20,
+      "damageQuantity": 0
+    },
+    {
+      "sku": "CANDI-001",
+      "receivedQuantity": 15,
+      "damageQuantity": 0
+    }
+  ],
+  "receivedDate": "2026-06-04",
+  "notes": "All items received in good condition"
+}
+
+###############################################################################
+# 4. KARIGAR MODULE TESTS
+###############################################################################
+
+### 4.1 Create Karigar
+POST {{baseUrl}}/karigars
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "name": "Ramesh Kumar",
+  "phone": "+977-9841234567",
+  "address": "Thamel, Kathmandu",
+  "specialization": ["Ring Making", "Pendant Design"],
+  "paymentRate": 500,
+  "rateUnit": "PIECE",
+  "bankDetails": {
+    "accountHolder": "Ramesh Kumar",
+    "accountNumber": "1234567890",
+    "bankName": "Nepal Investment Bank"
+  }
+}
+
+### 4.2 Create Another Karigar
+POST {{baseUrl}}/karigars
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "name": "Priya Sharma",
+  "phone": "+977-9841234568",
+  "address": "Bhaktapur, Nepal",
+  "specialization": ["Necklace Design", "Bracelet Making"],
+  "paymentRate": 600,
+  "rateUnit": "PIECE",
+  "bankDetails": {
+    "accountHolder": "Priya Sharma",
+    "accountNumber": "0987654321",
+    "bankName": "Rastriya Banijya Bank"
+  }
+}
+
+### 4.3 Get All Karigars
+GET {{baseUrl}}/karigars?status=ACTIVE&limit=20
+Authorization: Bearer {{token}}
+
+### 4.4 Get Karigar Details
+# Note: Replace {karigarId} with actual ID
+GET {{baseUrl}}/karigars/{karigarId}
+Authorization: Bearer {{token}}
+
+### 4.5 Create Production Order
+# Note: Replace {karigarId} with actual karigar ID
+POST {{baseUrl}}/production-orders
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "karigarId": "{karigarId}",
+  "items": [
+    {
+      "description": "Gold Ring - Classic Design",
+      "metalType": "GOLD",
+      "weight": {
+        "gram": 5.5,
+        "tola": 0.65
+      },
+      "quantity": 5,
+      "design": "Classic band",
+      "specialInstructions": "Smooth finish, no stones"
+    }
+  ],
+  "estimatedDelivery": "2026-06-20",
+  "issuedAt": "2026-06-04",
+  "notes": "Urgent order - customer deadline"
+}
+
+### 4.6 Get Production Orders
+GET {{baseUrl}}/production-orders?status=OPEN&limit=20
+Authorization: Bearer {{token}}
+
+### 4.7 Issue Material to Karigar
+# Note: Replace {orderId} with actual production order ID and {stockId} with actual stock ID
+POST {{baseUrl}}/production-orders/{orderId}/issue
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "stockItemId": "{stockId}",
+  "quantity": 5,
+  "weight": {
+    "gram": 27.5,
+    "tola": 3.25
+  },
+  "issuedAt": "2026-06-04"
+}
+
+### 4.8 Receive Completed Items from Karigar
+# Note: Replace {orderId} with actual production order ID
+POST {{baseUrl}}/production-orders/{orderId}/receive
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "receivedItems": [
+    {
+      "description": "Gold Ring - Classic Design",
+      "quantity": 5,
+      "weight": {
+        "gram": 25,
+        "tola": 2.95
+      },
+      "qualityStatus": "APPROVED",
+      "notes": "Excellent finish"
+    }
+  ],
+  "receivedAt": "2026-06-20",
+  "materialLoss": {
+    "gram": 2.5,
+    "tola": 0.30
+  }
+}
+
+### 4.9 Create Karigar Payment
+# Note: Replace {karigarId} and {orderId} with actual IDs
+POST {{baseUrl}}/karigars/{karigarId}/payments
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "orderId": "{orderId}",
+  "paymentAmount": 2500,
+  "paymentMethod": "CASH",
+  "paymentDate": "2026-06-20",
+  "notes": "Payment for completed order"
+}
+
+###############################################################################
+# 5. SALES MODULE TESTS
+###############################################################################
+
+### 5.1 Create Customer (if needed)
+POST {{baseUrl}}/customers
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "firstName": "Arun",
+  "lastName": "Sharma",
+  "phone": "+977-9841000111",
+  "email": "arun@email.com"
+}
+
+### 5.2 SELL Transaction
+# Note: Replace {customerId} and {stockId} with actual IDs
+POST {{baseUrl}}/sales/sell
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "customerId": "{customerId}",
+  "items": [
+    {
+      "stockId": "{stockId}",
+      "quantity": 1,
+      "customJerty": 500,
+      "customJyala": {
+        "type": "PERCENTAGE",
+        "value": 15
+      }
+    }
+  ],
+  "billDate": "2026-06-04",
+  "paymentMethod": "CASH",
+  "paidAmount": 413062.50,
+  "notes": "Regular customer - ring purchase"
+}
+
+### 5.3 RETURN Transaction
+# Note: Replace {originalBillId} and {stockId} with actual IDs
+POST {{baseUrl}}/sales/return
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "originalBillId": "{originalBillId}",
+  "items": [
+    {
+      "stockId": "{stockId}",
+      "quantityReturned": 1,
+      "returnReason": "DEFECT",
+      "notes": "Stone was loose"
+    }
+  ],
+  "returnDate": "2026-06-05",
+  "refundMethod": "CASH",
+  "refundAmount": 413062.50
+}
+
+### 5.4 BUYBACK Transaction
+# Note: Replace {customerId} with actual customer ID
+POST {{baseUrl}}/sales/buyback
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "customerId": "{customerId}",
+  "items": [
+    {
+      "metalType": "GOLD",
+      "weight": {
+        "gram": 5.0,
+        "tola": 0.59
+      },
+      "purity": "22K",
+      "quantity": 1,
+      "itemDescription": "Old gold bracelet"
+    }
+  ],
+  "buybackDate": "2026-06-05",
+  "paymentMethod": "CASH",
+  "buybackRate": 64000,
+  "notes": "Customer buyback - old gold"
+}
+
+### 5.5 OLD GOLD Transaction
+# Note: Replace {customerId} with actual customer ID
+POST {{baseUrl}}/sales/old-gold
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "customerId": "{customerId}",
+  "items": [
+    {
+      "description": "Old gold ornaments",
+      "weight": {
+        "gram": 10.0,
+        "tola": 1.18
+      },
+      "purity": "18K",
+      "quantity": 3
+    }
+  ],
+  "oldGoldDate": "2026-06-05",
+  "paymentMethod": "CASH",
+  "appliedRate": 60000,
+  "notes": "Customer exchanging old gold"
+}
+
+### 5.6 EXCHANGE Transaction
+# Note: Replace {customerId}, {stockId}, {stockId2} with actual IDs
+POST {{baseUrl}}/sales/exchange
+Authorization: Bearer {{token}}
+Content-Type: application/json
+
+{
+  "customerId": "{customerId}",
+  "itemsReturned": [
+    {
+      "stockId": "{stockId}",
+      "quantity": 1,
+      "returnedMetalWeight": {
+        "gram": 5.0,
+        "tola": 0.59
+      }
+    }
+  ],
+  "itemsReceived": [
+    {
+      "stockId": "{stockId2}",
+      "quantity": 1,
+      "customJerty": 600
+    }
+  ],
+  "exchangeDate": "2026-06-05",
+  "balancePaymentMethod": "CASH",
+  "balanceAmount": 50000,
+  "notes": "Customer exchange - size issue"
+}
+
+### 5.7 Get Sales Transactions for Customer
+# Note: Replace {customerId} with actual customer ID
+GET {{baseUrl}}/sales?customerId={customerId}&limit=50
+Authorization: Bearer {{token}}
+
+### 5.8 Get Sales Transaction Details
+# Note: Replace {transactionId} with actual transaction ID
+GET {{baseUrl}}/sales/{transactionId}
+Authorization: Bearer {{token}}

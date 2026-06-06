@@ -45,7 +45,7 @@ async function bootstrap() {
         '- `OWNER` — Full access\n' +
         '- `MANAGER` — Most operations except deactivation of trade parties\n' +
         '- `STAFF` — Read-only + customer registration + price preview',
-      )
+       )
       .setVersion('1.0')
       .addBearerAuth()
       .addTag('Auth', 'Authentication and user management')

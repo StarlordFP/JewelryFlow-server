@@ -134,6 +134,7 @@ export class PurchaseService {
         jertyTola:       jertyW.tola,
         jertyLal:        jertyW.lal,
         priceNpr:        line.priceNpr,
+        rateAtPurchasePerGram: line.rateAtPurchasePerGram ?? null,
       };
     });
 
@@ -146,6 +147,9 @@ export class PurchaseService {
         totalNpr,
         status:          'PENDING',
         notes:           dto.notes,
+        purchaseDate: dto.purchaseDate
+        ? new Date(`${dto.purchaseDate}T00:00:00.000Z`)
+        : new Date(),
         lines:           { create: linesData },
       },
       include: {
@@ -175,9 +179,11 @@ export class PurchaseService {
 
     // Get today's entry rate for stock items
     const entryRate = await this.prisma.dailyRate.findFirst({
-      where:   { isCurrent: true },
-      orderBy: { effectiveDate: 'desc' },
-    });
+    where:   {
+      effectiveDate: { lte: po.purchaseDate },
+    },
+    orderBy: { effectiveDate: 'desc' },
+  });
 
     return this.prisma.$transaction(async (tx) => {
       let newTotal = new Decimal(0);
@@ -232,6 +238,10 @@ export class PurchaseService {
           },
         });
 
+        const finalRate = update?.rateAtPurchasePerGram
+        ?? Number(line.rateAtPurchasePerGram)   // from order creation
+        ?? null;
+
         // Update line with actual received values + stock item reference
         await tx.purchaseOrderLine.update({
           where: { id: line.id },
@@ -243,6 +253,7 @@ export class PurchaseService {
             jertyTola:       finalJertyTola,
             jertyLal:        finalJertyLal,
             priceNpr:        finalPrice,
+            rateAtPurchasePerGram: finalRate,
             stockItemId:     stockItem.id,
           },
         });
@@ -339,8 +350,11 @@ export class PurchaseService {
   }
 
   private async getDefaultCategoryId(tx: any): Promise<string> {
-    let cat = await tx.itemCategory.findFirst({ where: { name: 'Uncategorised' } });
-    if (!cat) cat = await tx.itemCategory.create({ data: { name: 'Uncategorised' } });
-    return cat.id;
-  }
+  const cat = await tx.itemCategory.upsert({
+    where:  { name: 'Uncategorised' },
+    update: {},                          // already exists — do nothing
+    create: { name: 'Uncategorised' },  // doesn't exist — create it
+  });
+  return cat.id;
+}
 }

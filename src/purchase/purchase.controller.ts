@@ -11,7 +11,7 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
-import { ApiTags } from '@nestjs/swagger';
+import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { PurchaseService } from './purchase.service';
 import {
   CreateSupplierDto,
@@ -21,7 +21,7 @@ import {
   ReceivePurchaseOrderDto,
   PurchaseOrderQueryDto,
 } from './dto/purchase.dto';
-import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+// import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/roles.decorator';
@@ -29,7 +29,8 @@ import { CurrentUser } from '../common/decorators/roles.decorator';
 // ─── SUPPLIER CONTROLLER ─────────────────────────────────────────────────────
 
 @ApiTags('Purchase')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@ApiBearerAuth()
+@UseGuards(RolesGuard)
 @Controller('suppliers')
 export class SupplierController {
   constructor(private readonly purchaseService: PurchaseService) {}
@@ -69,7 +70,8 @@ export class SupplierController {
 // ─── PURCHASE ORDER CONTROLLER ────────────────────────────────────────────────
 
 @ApiTags('Purchase')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@ApiBearerAuth()
+@UseGuards(RolesGuard)
 @Controller('purchase-orders')
 export class PurchaseOrderController {
   constructor(private readonly purchaseService: PurchaseService) {}

@@ -28,13 +28,13 @@ import {
   CustomerQueryDto,
   PhoneLookupDto,
 } from './dto/customer.dto';
-import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+// import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 
 @ApiTags('Customers')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(RolesGuard)
 @Controller('customers')
 export class CustomerController {
   constructor(private readonly customerService: CustomerService) {}

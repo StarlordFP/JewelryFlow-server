@@ -10,6 +10,7 @@ import {
   HttpStatus,
 } from '@nestjs/common';
 import { ApiTags } from '@nestjs/swagger';
+import { Throttle, SkipThrottle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import {
   LoginDto,
@@ -26,7 +27,8 @@ import {
   VerifyEmailDto,
   ResendVerificationDto,
 } from './auth.dto';
-import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+import { Public } from '../common/decorators/public.decorator';
+// import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/roles.decorator';
@@ -36,7 +38,7 @@ import { CurrentUser } from '../common/decorators/roles.decorator';
 @ApiTags('Auth')
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(private readonly authService: AuthService) { }
 
   /**
    * POST /auth/signup
@@ -44,6 +46,9 @@ export class AuthController {
    */
   @Post('signup')
   @HttpCode(HttpStatus.CREATED)
+  @Public()
+  // 5 signup attempts per IP per 10 minutes
+  @Throttle({ default: { ttl: 600_000, limit: 5 } })
   signup(@Body() dto: SignupDto) {
     return this.authService.signup(dto);
   }
@@ -54,6 +59,10 @@ export class AuthController {
    */
   @Post('verify-email')
   @HttpCode(HttpStatus.OK)
+  @Public()
+  // 5 OTP attempts per IP per 15 minutes — brute force protection
+  // OTP space is only 900,000 combinations without this
+  @Throttle({ default: { ttl: 900_000, limit: 5 } })
   verifyEmail(@Body() dto: VerifyEmailDto) {
     return this.authService.verifyEmail(dto);
   }
@@ -64,6 +73,9 @@ export class AuthController {
    */
   @Post('resend-verification')
   @HttpCode(HttpStatus.OK)
+  @Public()
+  // 3 resend attempts per IP per 10 minutes — prevent SMTP spam
+  @Throttle({ default: { ttl: 600_000, limit: 3 } })
   resendVerification(@Body() dto: ResendVerificationDto) {
     return this.authService.resendVerification(dto);
   }
@@ -74,6 +86,9 @@ export class AuthController {
    */
   @Post('login')
   @HttpCode(HttpStatus.OK)
+  @Public()
+  // 10 login attempts per IP per 15 minutes — brute force protection
+  @Throttle({ default: { ttl: 900_000, limit: 10 } })
   login(@Body() dto: LoginDto) {
     return this.authService.login(dto);
   }
@@ -84,12 +99,13 @@ export class AuthController {
    */
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
-  @UseGuards(JwtAuthGuard)
+  @Public()
+  // Generous limit — legitimate clients refresh frequently
+  @Throttle({ default: { ttl: 60_000, limit: 30 } })
   refresh(
-    @CurrentUser('id') userId: string,
     @Body() dto: RefreshTokenDto,
   ) {
-    return this.authService.refresh(userId, dto.refreshToken);
+    return this.authService.refresh(dto.userId, dto.refreshToken);
   }
 
   /**
@@ -98,7 +114,9 @@ export class AuthController {
    */
   @Post('logout')
   @HttpCode(HttpStatus.OK)
-  @UseGuards(JwtAuthGuard)
+  // @UseGuards(JwtAuthGuard)
+  // authenticated action, no need to throttle
+  @SkipThrottle()
   logout(@CurrentUser('id') userId: string) {
     return this.authService.logout(userId);
   }
@@ -109,7 +127,9 @@ export class AuthController {
    */
   @Post('change-password')
   @HttpCode(HttpStatus.OK)
-  @UseGuards(JwtAuthGuard)
+  // @UseGuards(JwtAuthGuard)
+  // 5 attempts per 10 minutes — prevent password guessing
+  @Throttle({ default: { ttl: 600_000, limit: 5 } })
   changePassword(
     @CurrentUser('id') userId: string,
     @Body() dto: ChangePasswordDto,
@@ -123,6 +143,9 @@ export class AuthController {
    */
   @Post('forgot-password')
   @HttpCode(HttpStatus.OK)
+  @Public()
+  // 3 attempts per 10 minutes — prevent SMTP spam + email enumeration
+  @Throttle({ default: { ttl: 600_000, limit: 3 } })
   forgotPassword(@Body() dto: ForgotPasswordDto) {
     return this.authService.forgotPassword(dto.email);
   }
@@ -133,6 +156,9 @@ export class AuthController {
    */
   @Post('reset-password')
   @HttpCode(HttpStatus.OK)
+  @Public()
+  // 5 attempts per 10 minutes
+  @Throttle({ default: { ttl: 600_000, limit: 5 } })
   resetPassword(@Body() dto: ResetPasswordDto) {
     return this.authService.resetPassword(dto);
   }
@@ -142,7 +168,9 @@ export class AuthController {
    * Get currently logged-in user with full permissions.
    */
   @Get('me')
-  @UseGuards(JwtAuthGuard)
+  // @UseGuards(JwtAuthGuard)
+  // authenticated, called frequently by frontend
+  @SkipThrottle()
   me(@CurrentUser('id') userId: string) {
     return this.authService.getUser(userId);
   }
@@ -151,10 +179,11 @@ export class AuthController {
 // ─── USER MANAGEMENT CONTROLLER ──────────────────────────────────────────────
 
 @ApiTags('Auth')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(RolesGuard)
+@SkipThrottle() // all routes here are authenticated + OWNER only
 @Controller('users')
 export class UserController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(private readonly authService: AuthService) { }
 
   /**
    * POST /users
@@ -215,10 +244,11 @@ export class UserController {
 // ─── ROLE MANAGEMENT CONTROLLER ──────────────────────────────────────────────
 
 @ApiTags('Auth')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards (RolesGuard)
+@SkipThrottle() // all routes here are authenticated + OWNER only
 @Controller('roles')
 export class RoleController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(private readonly authService: AuthService) { }
 
   /**
    * POST /roles

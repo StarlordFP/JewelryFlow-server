@@ -9,6 +9,7 @@ import {
   UseGuards,
   HttpCode,
   HttpStatus,
+  BadRequestException,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -24,15 +25,18 @@ import {
   UpdateStockItemDto,
   UpdateStockStatusDto,
   PricePreviewDto,
+  StandalonePricePreviewDto,
   StockQueryDto,
+  CreateCategoryDto,    // ← add
+  UpdateCategoryDto,    // ← add
 } from './dto/stock.dto';
-import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+// import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 
 @ApiTags('Stock')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(RolesGuard)
 @Controller('stock')
 export class StockController {
   constructor(private readonly stockService: StockService) {}
@@ -103,22 +107,32 @@ export class StockController {
   /**
    * POST /stock/price-preview
    * Calculate full price for a stock item using today's rate.
-   * Jerty and jyala can be overridden here (bill-time adjustment).
+   * Supports two modes:
+   *   1. With stockItemId — uses stored item data, allows jerty/jyala overrides
+   *   2. Without stockItemId — standalone preview before stock exists
    * Returns both owner view (full jyala breakdown) and customer view (jyala as single line).
    * Roles: OWNER, MANAGER, STAFF
    */
   @Post('price-preview')
   @HttpCode(HttpStatus.OK)
   @Roles('OWNER', 'MANAGER', 'STAFF')
-  @ApiOperation({ summary: 'Price preview', description: 'Calculate full price for a stock item using today\'s rate. Jerty and jyala can be overridden (bill-time adjustment). Returns owner view (full breakdown) and customer view (single jyala line).' })
+  @ApiOperation({ summary: 'Price preview', description: 'Calculate full price using today\'s rate. Accepts either stockItemId (for existing items) or full item details (for preview before adding stock).' })
   @ApiResponse({ status: 200, description: 'Price calculated successfully' })
   @ApiResponse({ status: 404, description: 'Stock item or daily rate not found' })
-  pricePreview(@Body() dto: PricePreviewDto) {
-    return this.stockService.getPricePreview(dto);
+  pricePreview(@Body() dto: any) {
+    // Route to the correct handler based on whether stockItemId is present
+    if (dto.stockItemId) {
+      return this.stockService.getPricePreview(dto as PricePreviewDto);
+    }
+    // Standalone preview — validate required fields
+    if (!dto.metalTypeId || !dto.grossWeight) {
+      throw new BadRequestException('metalTypeId and grossWeight are required for standalone price preview');
+    }
+    return this.stockService.getStandalonePricePreview(dto as StandalonePricePreviewDto);
   }
 
   /**
-   * GET /stock/suggestions?categoryId=&metalTypeId=&weightGram=
+   * GET /stock/suggestions?categoryId=&metalTypeId=&grossWeightGram=
    * Returns suggested jerty weight and jyala range for a given
    * category + metal + weight. Used by frontend to hint shopkeeper.
    * Roles: OWNER, MANAGER, STAFF
@@ -128,26 +142,85 @@ export class StockController {
   @ApiOperation({ summary: 'Get jerty & jyala suggestions', description: 'Returns suggested jerty weight and jyala range for a given category + metal + weight combination. Used to hint the shopkeeper.' })
   @ApiQuery({ name: 'categoryId', required: true, description: 'Category ID' })
   @ApiQuery({ name: 'metalTypeId', required: true, description: 'Metal type ID' })
-  @ApiQuery({ name: 'weightGram', required: true, description: 'Weight in grams', example: '11.664' })
+  @ApiQuery({ name: 'grossWeightGram', required: true, description: 'Weight in grams', example: '11.664' })
   @ApiResponse({ status: 200, description: 'Suggestions retrieved successfully' })
   suggestions(
-    @Query('categoryId')  categoryId:  string,
-    @Query('metalTypeId') metalTypeId: string,
-    @Query('weightGram')  weightGram:  string,
+    @Query('categoryId')     categoryId:     string,
+    @Query('metalTypeId')    metalTypeId:    string,
+    @Query('grossWeightGram') grossWeightGram: string,
   ) {
+    const weight = parseFloat(grossWeightGram);
+    if (isNaN(weight)) {
+      throw new BadRequestException('grossWeightGram must be a valid number');
+    }
     return this.stockService.getSuggestions(
       categoryId,
       metalTypeId,
-      parseFloat(weightGram),
+      weight,
     );
   }
 
 
-  @Get('categories')
-  @Roles('OWNER', 'MANAGER', 'STAFF')
-  getCategories() {
-    return this.stockService.getCategories()
-  }
+  // ─── CATEGORY MANAGEMENT ──────────────────────────────────────────────────────
+
+/**
+ * GET /stock/categories
+ * List all active categories.
+ * Roles: OWNER, MANAGER, STAFF
+ */
+@Get('categories')
+@Roles('OWNER', 'MANAGER', 'STAFF')
+@ApiOperation({ summary: 'List categories' })
+getCategories() {
+  return this.stockService.getCategories();
+}
+
+/**
+ * POST /stock/categories
+ * Owner creates a new category.
+ * Roles: OWNER, MANAGER
+ */
+@Post('categories')
+@Roles('OWNER', 'MANAGER')
+@ApiOperation({ summary: 'Create category', description: 'Owner creates a new jewelry category e.g. Ring, Necklace, Bangle' })
+@ApiResponse({ status: 201, description: 'Category created' })
+@ApiResponse({ status: 409, description: 'Category name already exists' })
+createCategory(@Body() dto: CreateCategoryDto) {
+  return this.stockService.createCategory(dto.name);
+}
+
+/**
+ * PATCH /stock/categories/:id
+ * Rename or toggle active status.
+ * Roles: OWNER, MANAGER
+ */
+@Patch('categories/:id')
+@Roles('OWNER', 'MANAGER')
+@ApiOperation({ summary: 'Update category', description: 'Rename category or toggle active status' })
+@ApiParam({ name: 'id', description: 'Category ID' })
+@ApiResponse({ status: 200, description: 'Category updated' })
+@ApiResponse({ status: 404, description: 'Category not found' })
+@ApiResponse({ status: 409, description: 'Category name already exists' })
+updateCategory(@Param('id') id: string, @Body() dto: UpdateCategoryDto) {
+  return this.stockService.updateCategory(id, dto);
+}
+
+/**
+ * DELETE /stock/categories/:id
+ * Soft delete — sets isActive=false.
+ * Blocked if active stock items use this category.
+ * Roles: OWNER
+ */
+@Patch('categories/:id/deactivate')
+@HttpCode(HttpStatus.OK)
+@Roles('OWNER')
+@ApiOperation({ summary: 'Deactivate category', description: 'Soft delete — blocked if active stock items use this category' })
+@ApiParam({ name: 'id', description: 'Category ID' })
+@ApiResponse({ status: 200, description: 'Category deactivated' })
+@ApiResponse({ status: 409, description: 'Category in use by active stock items' })
+deactivateCategory(@Param('id') id: string) {
+  return this.stockService.deactivateCategory(id);
+}
 
   /**
    * GET /stock/:id

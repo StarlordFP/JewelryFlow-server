@@ -9,19 +9,34 @@ import {
   HttpCode,
   HttpStatus,
 } from '@nestjs/common';
-import { ApiTags } from '@nestjs/swagger';
+import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { RatesService } from './rates.service';
-import { SetDailyRateDto, RateHistoryQueryDto } from './dto/rates.dto';
-import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+import { SetDailyRateDto, RateHistoryQueryDto, SetGoldRatesDto } from './dto/rates.dto';
+// import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/roles.decorator';
 
 @ApiTags('Rates')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@ApiBearerAuth()
+@UseGuards(RolesGuard)
 @Controller('rates')
 export class RatesController {
   constructor(private readonly ratesService: RatesService) {}
+
+  /**
+   * POST /rates/gold
+   * Set gold rates for all karat types derived from 24K base rate.
+   * Roles: OWNER, MANAGER
+   */
+  @Post('gold')
+  @Roles('OWNER', 'MANAGER')
+  setGoldRates(
+    @CurrentUser('id') userId: string,
+    @Body() dto: SetGoldRatesDto,
+  ) {
+    return this.ratesService.setGoldRatesFrom24K(userId, dto);
+  }
 
   /**
    * POST /rates
@@ -37,6 +52,7 @@ export class RatesController {
   ) {
     return this.ratesService.setRate(userId, dto);
   }
+
 
   /**
    * GET /rates/today

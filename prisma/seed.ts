@@ -103,17 +103,17 @@ async function main() {
     const ownerRole = await prisma.role.findUnique({ where: { name: 'OWNER' } });
     if (!ownerRole) throw new Error('OWNER role not found');
 
-    const passwordHash = await bcrypt.hash('owner123', 12);
+    const passwordHash = await bcrypt.hash('password123', 12);
     await prisma.user.create({
       data: {
         name:          'Shop Owner',
-        email:         'owner@jewelryflow.com',
+        email:         'owner@jewelryflow.test',
         passwordHash,
         emailVerified: true,
         userRoles: { create: [{ roleId: ownerRole.id }] },
       },
     });
-    console.log('  ✓ Default owner: owner@jewelryflow.com / owner123');
+    console.log('  ✓ Default owner: owner@jewelryflow.test / password123');
   } else {
     console.log('  ℹ️  Users exist — skipping default owner');
   }
@@ -228,6 +228,32 @@ for (const r of sampleRates) {
     },
   })
 }
+
+// In seed.ts
+await prisma.luxuryTaxRule.upsert({
+  where:  { id: 'luxury-tax-rule-default' },
+  update: {},
+  create: {
+    id:            'luxury-tax-rule-default',
+    rate:          0.02,          // 2%
+    appliesTo:     'GOLD',
+    effectiveDate: new Date('2024-01-01'),
+    isActive:      false,         // starts inactive — owner enables when needed
+  },
+});
+
+await prisma.vatRule.upsert({
+  where:  { id: 'vat-rule-default' },
+  update: {},
+  create: {
+    id:            'vat-rule-default',
+    rate:          0.13,          // 13%
+    appliesTo:     'JYALA',
+    effectiveDate: new Date('2024-01-01'),
+    isActive:      true,
+  },
+});
+
 console.log('  ✓ Sample rates seeded (sell + buy rates)')
 }
 

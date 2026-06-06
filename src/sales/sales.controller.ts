@@ -20,13 +20,13 @@ import {
   AddPaymentDto,
   SalesQueryDto,
 } from './dto/sales.dto';
-import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+// import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/roles.decorator';
 
 @ApiTags('Sales')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(RolesGuard)
 @Controller('sales')
 export class SalesController {
   constructor(private readonly salesService: SalesService) {}

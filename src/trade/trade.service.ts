@@ -151,6 +151,20 @@ export class TradeService {
     });
     if (!party) throw new NotFoundException(`TradeParty ${supplierId} not found`);
     if (!party.isActive) throw new BadRequestException('TradeParty is inactive');
+    if (party.supplierType !== 'TRADE') {
+      throw new BadRequestException('Trades can only be created for TRADE suppliers');
+    }
+
+    // ── Validate rate ────────────────────────────────────────────────────
+    try {
+      const rateDec = new Decimal(rateAtTradePerGram);
+      if (rateDec.lte(0)) {
+        throw new BadRequestException('Rate must be positive');
+      }
+    } catch (e) {
+      if (e instanceof BadRequestException) throw e;
+      throw new BadRequestException('Invalid rate format');
+    }
 
     // ── Validate metal type ───────────────────────────────────────────────
     const metalType = await this.prisma.metalType.findUnique({
@@ -408,12 +422,11 @@ export class TradeService {
   }
 
   private async getDefaultCategoryId(tx: any): Promise<string> {
-    let cat = await tx.itemCategory.findFirst({
-      where: { name: 'Uncategorised' },
-    });
-    if (!cat) {
-      cat = await tx.itemCategory.create({ data: { name: 'Uncategorised' } });
-    }
-    return cat.id;
-  }
+  const cat = await tx.itemCategory.upsert({
+    where:  { name: 'Uncategorised' },
+    update: {},                          // already exists — do nothing
+    create: { name: 'Uncategorised' },  // doesn't exist — create it
+  });
+  return cat.id;
+}
 }

@@ -149,6 +149,7 @@ model UserRole {
   role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
 
   @@unique([userId, roleId])
+  @@index([userId])
   @@map("user_roles")
 }
 
@@ -198,6 +199,8 @@ model DailyRate {
   // Rate at time of stock entry — stored on StockItem for history view
   stockItems   StockItem[]   @relation("StockEntryRate")
 
+  @@index([metalTypeId, isCurrent])
+  @@index([effectiveDate(sort: Desc)])
   @@map("daily_rates")
 }
 
@@ -335,6 +338,11 @@ model PurchaseOrder {
   totalNpr        Decimal             @db.Decimal(12, 2)
   status          PurchaseOrderStatus @default(PENDING)
   notes           String?
+
+    // ── Purchase date — defaults to today, customisable by owner ─────────────
+  // Allows backdating if owner forgot to enter the order on the actual day
+  purchaseDate    DateTime            @default(now())
+
   createdAt       DateTime            @default(now())
   updatedAt       DateTime            @updatedAt
 
@@ -342,6 +350,8 @@ model PurchaseOrder {
   createdBy  User                @relation("POCreatedBy", fields: [createdByUserId], references: [id])
   lines      PurchaseOrderLine[]
 
+  @@index([supplierId])
+  @@index([status])
   @@map("purchase_orders")
 }
 
@@ -370,6 +380,11 @@ model PurchaseOrderLine {
   jertyLal        Decimal  @default(0) @db.Decimal(10, 4)
   priceNpr        Decimal  @db.Decimal(12, 2)
 
+    // ── Rate at time of purchase — for audit/history ──────────────────────────
+  // Owner enters the rate they actually bought at (may differ from today's rate)
+  // Especially useful when backdating a purchase order
+  rateAtPurchasePerGram Decimal? @db.Decimal(12, 2)
+  
   // Back-reference to StockItem created when PO is RECEIVED
   stockItemId     String?  @unique
 
@@ -436,6 +451,10 @@ model StockItem {
   addons               StockItemAddon[]
   transactionLines     TransactionLine[]
 
+  @@index([status])
+  @@index([categoryId, metalTypeId])
+  @@index([categoryId, metalTypeId, grossWeightGram])
+  @@index([createdAt(sort: Desc)])
   @@map("stock_items")
 }
 
@@ -479,6 +498,8 @@ model Trade {
   givenMetal MetalType   @relation("GivenMetal", fields: [givenMetalTypeId], references: [id])
   tradeItems TradeItem[]
 
+  @@index([supplierId])
+  @@index([status])
   @@map("trades")
 }
 
@@ -539,6 +560,8 @@ model ProductionOrder {
   payments         KarigarPayment[]
   disputes         KarigarDispute[]
 
+  @@index([karigarId])
+  @@index([status])
   @@map("production_orders")
 }
 
@@ -562,6 +585,7 @@ model ProductionIssue {
   metalType        MetalType         @relation(fields: [metalTypeId], references: [id])
   productionReturns ProductionReturn[]
 
+  @@index([productionOrderId])
   @@map("production_issues")
 }
 
@@ -590,6 +614,8 @@ model ProductionReturn {
   productionIssue  ProductionIssue   @relation(fields: [productionIssueId], references: [id])
   productionItems  ProductionItem[]
 
+  @@index([productionOrderId])
+  @@index([productionIssueId])
   @@map("production_returns")
 }
 
@@ -640,6 +666,8 @@ model KarigarPayment {
   productionOrder ProductionOrder @relation(fields: [productionOrderId], references: [id])
   metalType       MetalType?      @relation("PaymentMetal", fields: [metalTypeId], references: [id])
 
+  @@index([karigarId])
+  @@index([productionOrderId])
   @@map("karigar_payments")
 }
 
@@ -668,6 +696,8 @@ model KarigarDispute {
   karigar         Karigar         @relation(fields: [karigarId], references: [id])
   productionOrder ProductionOrder @relation(fields: [productionOrderId], references: [id])
 
+  @@index([karigarId])
+  @@index([status])
   @@map("karigar_disputes")
 }
 
@@ -687,6 +717,8 @@ model Customer {
   transactions   Transaction[]
   buybackRecords BuybackRecord[]
 
+  @@index([name])
+  @@index([isActive])
   @@map("customers")
 }
 
@@ -721,6 +753,11 @@ model Transaction {
   buybackRecord  BuybackRecord?
   payments       PaymentRecord[]
 
+  @@index([customerId])
+  @@index([txType])
+  @@index([createdAt(sort: Desc)])
+  @@index([balanceNpr])
+  @@index([exchangeGroupId])
   @@map("transactions")
 }
 
@@ -729,7 +766,7 @@ model Transaction {
 model TransactionLine {
   id              String  @id @default(cuid())
   transactionId   String
-  stockItemId     String
+  stockItemId     String?
   grossWeightGram Decimal @db.Decimal(10, 4)
   jertyGram       Decimal @db.Decimal(10, 4)
   billableGram    Decimal @db.Decimal(10, 4)
@@ -747,8 +784,10 @@ model TransactionLine {
   lineTotalNpr    Decimal @db.Decimal(12, 2)
 
   transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
-  stockItem   StockItem   @relation(fields: [stockItemId], references: [id])
+  stockItem   StockItem? @relation(fields: [stockItemId], references: [id])
 
+  @@index([transactionId])
+  @@index([stockItemId])
   @@map("transaction_lines")
 }
 
@@ -765,6 +804,7 @@ model PaymentRecord {
 
   transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
 
+  @@index([transactionId])
   @@map("payment_records")
 }
 

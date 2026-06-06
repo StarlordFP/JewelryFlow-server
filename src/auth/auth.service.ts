@@ -9,7 +9,7 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../prisma/prisma.service';
 import * as bcrypt from 'bcrypt';
-import { createHash, randomBytes } from 'crypto';
+import { createHash, randomBytes, randomInt } from 'crypto';
 import * as nodemailer from 'nodemailer';
 import {
   LoginDto,
@@ -25,19 +25,28 @@ import {
   ResetPasswordDto,
 } from './auth.dto';
 
-const SALT_ROUNDS    = 12;
+const SALT_ROUNDS = 12;
 const REFRESH_EXPIRY = '7d';
-const ACCESS_EXPIRY  = '8h';
+const ACCESS_EXPIRY = '8h';
 const OTP_EXPIRY_MINUTES = 15;
 
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
+  private readonly transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST || 'smtp.gmail.com',
+    port: parseInt(process.env.SMTP_PORT || '587', 10),
+    secure: process.env.SMTP_SECURE === 'true',
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS,
+    },
+  });
 
   constructor(
-    private readonly prisma:  PrismaService,
-    private readonly jwt:     JwtService,
-  ) {}
+    private readonly prisma: PrismaService,
+    private readonly jwt: JwtService,
+  ) { }
 
   // ════════════════════════════════════════════════════════════════════════════
   //  AUTH — SIGNUP / VERIFY / LOGIN / LOGOUT / REFRESH
@@ -68,13 +77,13 @@ export class AuthService {
 
     const user = await this.prisma.user.create({
       data: {
-        name:              dto.name,
-        email:             dto.email,
+        name: dto.name,
+        email: dto.email,
         passwordHash,
-        emailVerified:     false,
-        emailVerifyToken:  otp,
+        emailVerified: false,
+        emailVerifyToken: otp,
         emailVerifyExpiry: expiry,
-        isActive:          true,
+        isActive: true,
       },
     });
 
@@ -83,7 +92,7 @@ export class AuthService {
 
     return {
       message: `Verification OTP sent to ${dto.email}. Please check your inbox.`,
-      email:   dto.email,
+      email: dto.email,
     };
   }
 
@@ -125,8 +134,8 @@ export class AuthService {
     await this.prisma.user.update({
       where: { id: user.id },
       data: {
-        emailVerified:     true,
-        emailVerifyToken:  null,
+        emailVerified: true,
+        emailVerifyToken: null,
         emailVerifyExpiry: null,
         ...(ownerRole ? {
           userRoles: {
@@ -161,7 +170,7 @@ export class AuthService {
     await this.prisma.user.update({
       where: { id: user.id },
       data: {
-        emailVerifyToken:  otp,
+        emailVerifyToken: otp,
         emailVerifyExpiry: expiry,
       },
     });
@@ -177,7 +186,7 @@ export class AuthService {
    */
   async login(dto: LoginDto) {
     const user = await this.prisma.user.findUnique({
-      where:   { email: dto.email },
+      where: { email: dto.email },
       include: {
         userRoles: { include: { role: { include: { rolePermissions: { include: { permission: true } } } } } },
       },
@@ -197,7 +206,7 @@ export class AuthService {
       throw new UnauthorizedException('Invalid credentials');
     }
 
-    const roles       = user.userRoles.map((ur) => ur.role.name);
+    const roles = user.userRoles.map((ur) => ur.role.name);
     const permissions = [
       ...new Set(
         user.userRoles.flatMap((ur) =>
@@ -208,13 +217,13 @@ export class AuthService {
 
     const payload = { sub: user.id, email: user.email, roles };
 
-    const accessToken  = this.jwt.sign(payload, { expiresIn: ACCESS_EXPIRY });
+    const accessToken = this.jwt.sign(payload, { expiresIn: ACCESS_EXPIRY });
     const refreshToken = this.generateRefreshToken();
 
     // Store hashed refresh token
     await this.prisma.user.update({
       where: { id: user.id },
-      data:  { refreshTokenHash: this.hashToken(refreshToken) },
+      data: { refreshTokenHash: this.hashToken(refreshToken) },
     });
 
     return {
@@ -222,9 +231,9 @@ export class AuthService {
       refreshToken,
       expiresIn: ACCESS_EXPIRY,
       user: {
-        id:          user.id,
-        name:        user.name,
-        email:       user.email,
+        id: user.id,
+        name: user.name,
+        email: user.email,
         roles,
         permissions,
       },
@@ -235,25 +244,25 @@ export class AuthService {
    * Refresh — validates refresh token, issues new access token.
    */
   async refresh(userId: string, refreshToken: string) {
-    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+  const user = await this.prisma.user.findUnique({ where: { id: userId } });
 
-    if (!user || !user.isActive || !user.refreshTokenHash) {
-      throw new UnauthorizedException('Invalid refresh token');
-    }
-
-    const tokenValid = this.hashToken(refreshToken) === user.refreshTokenHash;
-    if (!tokenValid) {
-      throw new UnauthorizedException('Invalid refresh token');
-    }
-
-    const roles   = await this.getUserRoleNames(userId);
-    const payload = { sub: user.id, email: user.email, roles };
-
-    return {
-      accessToken: this.jwt.sign(payload, { expiresIn: ACCESS_EXPIRY }),
-      expiresIn:   ACCESS_EXPIRY,
-    };
+  if (!user || !user.isActive || !user.refreshTokenHash) {
+    throw new UnauthorizedException('Invalid refresh token');
   }
+
+  const tokenValid = this.hashToken(refreshToken) === user.refreshTokenHash;
+  if (!tokenValid) {
+    throw new UnauthorizedException('Invalid refresh token');
+  }
+
+  const roles   = await this.getUserRoleNames(userId);
+  const payload = { sub: user.id, email: user.email, roles };
+
+  return {
+    accessToken: this.jwt.sign(payload, { expiresIn: ACCESS_EXPIRY }),
+    expiresIn:   ACCESS_EXPIRY,
+  };
+}
 
   /**
    * Logout — clears refresh token from DB.
@@ -261,7 +270,7 @@ export class AuthService {
   async logout(userId: string) {
     await this.prisma.user.update({
       where: { id: userId },
-      data:  { refreshTokenHash: null },
+      data: { refreshTokenHash: null },
     });
     return { message: 'Logged out successfully' };
   }
@@ -280,7 +289,7 @@ export class AuthService {
     const passwordHash = await bcrypt.hash(dto.newPassword, SALT_ROUNDS);
     await this.prisma.user.update({
       where: { id: userId },
-      data:  { passwordHash, refreshTokenHash: null }, // invalidate all sessions
+      data: { passwordHash, refreshTokenHash: null }, // invalidate all sessions
     });
 
     return { message: 'Password changed successfully' };
@@ -288,30 +297,29 @@ export class AuthService {
 
   async forgotPassword(email: string) {
     const user = await this.prisma.user.findUnique({ where: { email } });
-
-    // Always return success — don't reveal if email exists
     if (!user) return { message: 'If that email exists, a reset link has been sent' };
 
-    const token  = randomBytes(32).toString('hex');
-    const expiry = new Date(Date.now() + 1000 * 60 * 60); // 1 hour
+    const token = randomBytes(32).toString('hex');
+    const tokenHash = this.hashToken(token);   // store hash, not plaintext
+    const expiry = new Date(Date.now() + 1000 * 60 * 60);
 
     await this.prisma.user.update({
       where: { id: user.id },
-      data:  { resetToken: token, resetTokenExpiry: expiry },
+      data: { resetToken: tokenHash, resetTokenExpiry: expiry },
     });
 
-    // TODO: send email with reset link containing token
-    // For now return token directly (remove in production)
-    return {
-      message: 'If that email exists, a reset link has been sent',
-      // Remove this in production:
-      debug_token: process.env.NODE_ENV === 'development' ? token : undefined,
-    };
+    // TODO: send email with reset link containing raw `token` (not the hash)
+    // this.sendResetEmail(email, token);
+
+    return { message: 'If that email exists, a reset link has been sent' };
   }
 
+
   async resetPassword(dto: ResetPasswordDto) {
+    const tokenHash = this.hashToken(dto.token);  // hash the incoming token first
+
     const user = await this.prisma.user.findUnique({
-      where: { resetToken: dto.token },
+      where: { resetToken: tokenHash },           // compare against stored hash
     });
 
     if (!user || !user.resetTokenExpiry || user.resetTokenExpiry < new Date()) {
@@ -321,11 +329,11 @@ export class AuthService {
     const passwordHash = await bcrypt.hash(dto.newPassword, SALT_ROUNDS);
     await this.prisma.user.update({
       where: { id: user.id },
-      data:  {
+      data: {
         passwordHash,
-        resetToken:       null,
+        resetToken: null,
         resetTokenExpiry: null,
-        refreshTokenHash: null, // invalidate all sessions
+        refreshTokenHash: null,
       },
     });
 
@@ -354,8 +362,8 @@ export class AuthService {
     });
 
     if (roles.length !== dto.roles.length) {
-      const found    = roles.map((r) => r.name);
-      const missing  = dto.roles.filter((r) => !found.includes(r));
+      const found = roles.map((r) => r.name);
+      const missing = dto.roles.filter((r) => !found.includes(r));
       throw new BadRequestException(`Roles not found: ${missing.join(', ')}`);
     }
 
@@ -363,8 +371,8 @@ export class AuthService {
 
     const user = await this.prisma.user.create({
       data: {
-        name:         dto.name,
-        email:        dto.email,
+        name: dto.name,
+        email: dto.email,
         passwordHash,
         userRoles: {
           create: roles.map((r) => ({ roleId: r.id })),
@@ -390,7 +398,7 @@ export class AuthService {
 
   async getUser(id: string) {
     const user = await this.prisma.user.findUnique({
-      where:   { id },
+      where: { id },
       include: {
         userRoles: {
           include: {
@@ -413,8 +421,8 @@ export class AuthService {
 
     return this.prisma.$transaction(async (tx) => {
       const data: any = {};
-      if (dto.name     !== undefined) data.name     = dto.name;
-      if (dto.email    !== undefined) data.email    = dto.email;
+      if (dto.name !== undefined) data.name = dto.name;
+      if (dto.email !== undefined) data.email = dto.email;
       if (dto.isActive !== undefined) data.isActive = dto.isActive;
 
       // Replace roles if provided
@@ -434,7 +442,7 @@ export class AuthService {
       }
 
       return tx.user.update({
-        where:   { id },
+        where: { id },
         data,
         include: { userRoles: { include: { role: true } } },
       });
@@ -459,7 +467,7 @@ export class AuthService {
       });
 
       return tx.user.findUnique({
-        where:   { id: userId },
+        where: { id: userId },
         include: { userRoles: { include: { role: true } } },
       });
     });
@@ -485,7 +493,7 @@ export class AuthService {
 
     return this.prisma.role.create({
       data: {
-        name:        dto.name,
+        name: dto.name,
         description: dto.description,
         rolePermissions: {
           create: permissionIds.map((id) => ({ permissionId: id })),
@@ -514,7 +522,7 @@ export class AuthService {
     return this.prisma.$transaction(async (tx) => {
       const data: any = {};
       if (dto.description !== undefined) data.description = dto.description;
-      if (dto.isActive    !== undefined) data.isActive    = dto.isActive;
+      if (dto.isActive !== undefined) data.isActive = dto.isActive;
 
       if (dto.permissions) {
         const perms = await tx.permission.findMany({
@@ -527,7 +535,7 @@ export class AuthService {
       }
 
       return tx.role.update({
-        where:   { id },
+        where: { id },
         data,
         include: { rolePermissions: { include: { permission: true } } },
       });
@@ -560,7 +568,7 @@ export class AuthService {
    * Generate a 6-digit numeric OTP.
    */
   private generateOtp(): string {
-    return Math.floor(100000 + Math.random() * 900000).toString();
+    return randomInt(100000, 1000000).toString();
   }
 
   /**
@@ -568,34 +576,23 @@ export class AuthService {
    */
   private async sendVerificationEmail(email: string, otp: string): Promise<void> {
     try {
-      const transporter = nodemailer.createTransport({
-        host: process.env.SMTP_HOST || 'smtp.gmail.com',
-        port: parseInt(process.env.SMTP_PORT || '587', 10),
-        secure: process.env.SMTP_SECURE === 'true', // true for 465, false for 587
-        auth: {
-          user: process.env.SMTP_USER,
-          pass: process.env.SMTP_PASS,
-        },
-      });
-
-      await transporter.sendMail({
-        from:    process.env.SMTP_FROM || '"JewelryFlow" <noreply@jewelryflow.com>',
-        to:      email,
+      await this.transporter.sendMail({   // ← this.transporter, not local var
+        from: process.env.SMTP_FROM || '"JewelryFlow" <noreply@jewelryflow.com>',
+        to: email,
         subject: 'JewelryFlow — Email Verification OTP',
-        text:    `Your verification code is: ${otp}\n\nThis code expires in ${OTP_EXPIRY_MINUTES} minutes.\n\nIf you did not sign up for JewelryFlow, please ignore this email.`,
-        html:    `
-          <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 32px; background: #fafafa; border-radius: 12px;">
-            <h2 style="color: #1a1a2e; margin-bottom: 8px;">Welcome to JewelryFlow ✨</h2>
-            <p style="color: #555; font-size: 15px;">Use the code below to verify your email address:</p>
-            <div style="background: #1a1a2e; color: #f5c542; font-size: 32px; font-weight: bold; letter-spacing: 8px; text-align: center; padding: 20px; border-radius: 8px; margin: 24px 0;">
-              ${otp}
-            </div>
-            <p style="color: #888; font-size: 13px;">This code expires in <strong>${OTP_EXPIRY_MINUTES} minutes</strong>.</p>
-            <p style="color: #888; font-size: 13px;">If you did not sign up for JewelryFlow, please ignore this email.</p>
+        text: `Your verification code is: ${otp}\n\nThis code expires in ${OTP_EXPIRY_MINUTES} minutes.\n\nIf you did not sign up for JewelryFlow, please ignore this email.`,
+        html: `
+        <div style="font-family: 'Segoe UI', Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 32px; background: #fafafa; border-radius: 12px;">
+          <h2 style="color: #1a1a2e; margin-bottom: 8px;">Welcome to JewelryFlow ✨</h2>
+          <p style="color: #555; font-size: 15px;">Use the code below to verify your email address:</p>
+          <div style="background: #1a1a2e; color: #f5c542; font-size: 32px; font-weight: bold; letter-spacing: 8px; text-align: center; padding: 20px; border-radius: 8px; margin: 24px 0;">
+            ${otp}
           </div>
-        `,
+          <p style="color: #888; font-size: 13px;">This code expires in <strong>${OTP_EXPIRY_MINUTES} minutes</strong>.</p>
+          <p style="color: #888; font-size: 13px;">If you did not sign up for JewelryFlow, please ignore this email.</p>
+        </div>
+      `,
       });
-
       this.logger.log(`Verification OTP sent to ${email}`);
     } catch (error) {
       this.logger.error(`Failed to send verification email to ${email}`, error);
@@ -605,7 +602,7 @@ export class AuthService {
 
   private async getUserRoleNames(userId: string): Promise<string[]> {
     const userRoles = await this.prisma.userRole.findMany({
-      where:   { userId },
+      where: { userId },
       include: { role: true },
     });
     return userRoles.map((ur) => ur.role.name);
@@ -616,19 +613,19 @@ export class AuthService {
 
     const permissions = includePermissions
       ? [
-          ...new Set(
-            user.userRoles?.flatMap((ur: any) =>
-              ur.role.rolePermissions?.map((rp: any) => rp.permission.name) ?? [],
-            ) ?? [],
-          ),
-        ]
+        ...new Set(
+          user.userRoles?.flatMap((ur: any) =>
+            ur.role.rolePermissions?.map((rp: any) => rp.permission.name) ?? [],
+          ) ?? [],
+        ),
+      ]
       : undefined;
 
     return {
-      id:        user.id,
-      name:      user.name,
-      email:     user.email,
-      isActive:  user.isActive,
+      id: user.id,
+      name: user.name,
+      email: user.email,
+      isActive: user.isActive,
       roles,
       ...(permissions ? { permissions } : {}),
       createdAt: user.createdAt,

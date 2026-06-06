@@ -9,6 +9,7 @@ import { StockService } from '../stock/stock.service';
 import { BillNumberService } from './bill-number.service';
 import { WeightUtil } from '../common/utils/weight.util';
 import { Decimal } from '@prisma/client/runtime/library';
+import { randomBytes } from 'crypto';
 import {
   CreateSellDto,
   CreateReturnDto,
@@ -24,10 +25,10 @@ const RETURN_WINDOW_DAYS = 7;
 @Injectable()
 export class SalesService {
   constructor(
-    private readonly prisma:       PrismaService,
+    private readonly prisma: PrismaService,
     private readonly stockService: StockService,
-    private readonly billNumber:   BillNumberService,
-  ) {}
+    private readonly billNumber: BillNumberService,
+  ) { }
 
   // ════════════════════════════════════════════════════════════════════════════
   //  SELL
@@ -47,44 +48,69 @@ export class SalesService {
   async createSell(userId: string, dto: CreateSellDto) {
     const { customerId, items, payment, notes } = dto;
 
-    // ── Get today's sell rate ─────────────────────────────────────────────────
-    // We'll use the first item's metal type to find today's rate
-    const firstItem = await this.prisma.stockItem.findUnique({
-      where:   { id: items[0].stockItemId },
-      include: { metalType: true, addons: true },
-    });
-    if (!firstItem) throw new NotFoundException(`StockItem ${items[0].stockItemId} not found`);
-
-    const dailyRate = await this.getCurrentSellRate(firstItem.metalTypeId!);
-
     return this.prisma.$transaction(async (tx) => {
       const billNum = await this.billNumber.generate(tx);
-      let subTotal  = new Decimal(0);
+      let subTotal = new Decimal(0);
       const lineData: any[] = [];
 
-      // ── Price each item ───────────────────────────────────────────────────
-      for (const lineDto of items) {
-        const stockItem = await tx.stockItem.findUnique({
-          where:   { id: lineDto.stockItemId },
-          include: { metalType: true, addons: true },
-        });
+      // ── Batch fetch all stock items in one query ──────────────────────────
+      const stockItemIds = items.map(i => i.stockItemId);
+      const stockItems = await tx.stockItem.findMany({
+        where: { id: { in: stockItemIds } },
+        include: { metalType: true, addons: true },
+      });
 
-        if (!stockItem) {
-          throw new NotFoundException(`StockItem ${lineDto.stockItemId} not found`);
-        }
-        if (stockItem.status !== 'IN_STOCK' && stockItem.status !== 'RESERVED') {
-          throw new ConflictException(
-            `StockItem ${stockItem.sku} is ${stockItem.status} — cannot be sold`,
+      // Validate all items were found
+      const foundIds = stockItems.map(s => s.id);
+      const missing = stockItemIds.filter(id => !foundIds.includes(id));
+      if (missing.length) {
+        throw new NotFoundException(`StockItems not found: ${missing.join(', ')}`);
+      }
+
+      // ── Atomic conditional update to mark items as SOLD ──────────────────
+      // Closes the race window entirely by ensuring items are only updated
+      // if they are currently IN_STOCK or RESERVED.
+      const soldResult = await tx.stockItem.updateMany({
+        where: {
+          id:     { in: stockItemIds },
+          status: { in: ['IN_STOCK', 'RESERVED'] },
+        },
+        data: { status: 'SOLD' },
+      });
+
+      if (soldResult.count !== stockItemIds.length) {
+        throw new ConflictException(
+          'One or more stock items have already been sold or reserved. Please review your selection.',
+        );
+      }
+
+      // ── Batch fetch all required rates (one per unique metalTypeId) ───────
+      const metalTypeIds = [...new Set(stockItems.map(s => s.metalTypeId).filter(Boolean))] as string[];
+      const rates = await tx.dailyRate.findMany({
+        where: { metalTypeId: { in: metalTypeIds }, isCurrent: true },
+      });
+
+      // Map metalTypeId → rate for O(1) lookup
+      const rateMap = new Map(rates.map(r => [r.metalTypeId, r]));
+
+      // Validate all rates exist
+      for (const metalTypeId of metalTypeIds) {
+        if (!rateMap.has(metalTypeId)) {
+          throw new BadRequestException(
+            `No current daily rate found for metal ${metalTypeId}. Please set today's rate first.`,
           );
         }
+      }
 
-        // Get rate for this item's metal type
-        const itemRate = stockItem.metalTypeId === firstItem.metalTypeId
-          ? dailyRate
-          : await this.getCurrentSellRate(stockItem.metalTypeId!);
+      // ── Price each item ───────────────────────────────────────────────────
+      // Build a map of stockItemId → lineDto for override lookup
+      const lineDtoMap = new Map(items.map(i => [i.stockItemId, i]));
 
-        // Calculate price with optional bill-time overrides
-        const pricing = this.stockService.calculatePrice(stockItem, itemRate, {
+      for (const stockItem of stockItems) {
+        const itemRate = rateMap.get(stockItem.metalTypeId!)!;
+        const lineDto = lineDtoMap.get(stockItem.id)!;
+
+        const pricing = await this.stockService.calculatePrice(stockItem, itemRate, {
           jertyOverride: lineDto.jertyOverride,
           jyalaOverride: lineDto.jyalaOverride,
         });
@@ -92,64 +118,61 @@ export class SalesService {
         subTotal = subTotal.plus(pricing.grandTotalNpr);
 
         lineData.push({
-          stockItemId:    stockItem.id,
+          stockItemId: stockItem.id,
           grossWeightGram: Number(stockItem.grossWeightGram),
-          jertyGram:       parseFloat(pricing.jertyWeight.raw.gram.toFixed(4)),
-          billableGram:    parseFloat(pricing.billableWeight.raw.gram.toFixed(4)),
-          ratePerGram:     itemRate.sellRatePerGram,
-          metalValueNpr:   pricing.metalValueNpr,
-          jyalaNpr:        pricing.jyalaCustomerView,
+          jertyGram: parseFloat(pricing.jertyWeight.raw.gram.toFixed(4)),
+          billableGram: parseFloat(pricing.billableWeight.raw.gram.toFixed(4)),
+          ratePerGram: itemRate.sellRatePerGram,
+          metalValueNpr: pricing.metalValueNpr,
+          jyalaNpr: pricing.jyalaCustomerView,
           makingChargeNpr: pricing.jyalaOwnerView.makingCharge,
-          stoneChargeNpr:  pricing.jyalaOwnerView.stoneCharge,
-          motiChargeNpr:   pricing.jyalaOwnerView.motiCharge,
-          malaChargeNpr:   pricing.jyalaOwnerView.malaCharge,
-          otherChargeNpr:  pricing.jyalaOwnerView.otherCharge,
-          luxuryTaxNpr:    pricing.luxuryTaxNpr,
-          vatNpr:          pricing.vatNpr,
-          addonValueNpr:   pricing.addonValueNpr,
-          lineTotalNpr:    pricing.grandTotalNpr,
+          stoneChargeNpr: pricing.jyalaOwnerView.stoneCharge,
+          motiChargeNpr: pricing.jyalaOwnerView.motiCharge,
+          malaChargeNpr: pricing.jyalaOwnerView.malaCharge,
+          otherChargeNpr: pricing.jyalaOwnerView.otherCharge,
+          luxuryTaxNpr: pricing.luxuryTaxNpr,
+          vatNpr: pricing.vatNpr,
+          addonValueNpr: pricing.addonValueNpr,
+          lineTotalNpr: pricing.grandTotalNpr,
         });
       }
 
-      const grandTotal  = subTotal;
-      const paidAmount  = new Decimal(payment.amountNpr);
-      const balance     = grandTotal.minus(paidAmount);
+      const grandTotal = subTotal;
+      const paidAmount = new Decimal(payment.amountNpr);
+      const balance = grandTotal.minus(paidAmount);
 
       // ── Create transaction ────────────────────────────────────────────────
+      // Use the first item's rate as the primary dailyRateId on the transaction
+      const primaryRate = rateMap.get(stockItems[0].metalTypeId!)!;
+
       const txn = await tx.transaction.create({
         data: {
-          billNumber:    billNum,
-          txType:        'SELL',
+          billNumber: billNum,
+          txType: 'SELL',
           customerId,
           createdByUserId: userId,
-          dailyRateId:   dailyRate.id,
-          subTotalNpr:   subTotal,
+          dailyRateId: primaryRate.id,
+          subTotalNpr: subTotal,
           grandTotalNpr: grandTotal,
           paidAmountNpr: paidAmount,
-          balanceNpr:    balance,
+          balanceNpr: balance,
           paymentMethod: payment.method,
           returnDeadline: new Date(Date.now() + RETURN_WINDOW_DAYS * 86400000),
           notes,
-          lines: {
-            create: lineData,
-          },
+          lines: { create: lineData },
           payments: {
             create: {
               amountNpr: paidAmount,
-              method:    payment.method,
+              method: payment.method,
               reference: payment.reference,
-              notes:     payment.notes,
+              notes: payment.notes,
             },
           },
         },
         include: this.fullTxInclude(),
       });
 
-      // ── Mark stock items as SOLD ──────────────────────────────────────────
-      await tx.stockItem.updateMany({
-        where: { id: { in: items.map((i) => i.stockItemId) } },
-        data:  { status: 'SOLD' },
-      });
+      // (Stock items were already atomically marked SOLD at step 5)
 
       return this.formatTxResponse(txn);
     });
@@ -172,7 +195,7 @@ export class SalesService {
     const { originalTxId, items, refund, notes } = dto;
 
     const originalTx = await this.prisma.transaction.findUnique({
-      where:   { id: originalTxId },
+      where: { id: originalTxId },
       include: { lines: true },
     });
 
@@ -205,7 +228,7 @@ export class SalesService {
 
       for (const returnItem of items) {
         const stockItem = await tx.stockItem.findUnique({
-          where:   { id: returnItem.stockItemId },
+          where: { id: returnItem.stockItemId },
           include: { metalType: true, addons: true },
         });
 
@@ -214,54 +237,53 @@ export class SalesService {
         // Get today's buy rate for refund calculation
         const buyRate = await this.getCurrentBuyRate(stockItem.metalTypeId!);
 
-        const pricing = this.stockService.calculatePrice(stockItem, {
+        const pricing = await this.stockService.calculatePrice(stockItem, {
           ...buyRate,
-          // Use buy rate for return valuation
           sellRatePerGram: buyRate.buyRatePerGram,
         });
 
         refundTotal = refundTotal.plus(pricing.grandTotalNpr);
 
         lineData.push({
-          stockItemId:     stockItem.id,
+          stockItemId: stockItem.id,
           grossWeightGram: Number(stockItem.grossWeightGram),
-          jertyGram:       Number(stockItem.jertyGram),
-          billableGram:    Number(stockItem.grossWeightGram) + Number(stockItem.jertyGram),
-          ratePerGram:     buyRate.buyRatePerGram,
-          metalValueNpr:   pricing.metalValueNpr,
-          jyalaNpr:        pricing.jyalaCustomerView,
+          jertyGram: Number(stockItem.jertyGram),
+          billableGram: Number(stockItem.grossWeightGram) + Number(stockItem.jertyGram),
+          ratePerGram: buyRate.buyRatePerGram,
+          metalValueNpr: pricing.metalValueNpr,
+          jyalaNpr: pricing.jyalaCustomerView,
           makingChargeNpr: pricing.jyalaOwnerView.makingCharge,
-          stoneChargeNpr:  pricing.jyalaOwnerView.stoneCharge,
-          motiChargeNpr:   pricing.jyalaOwnerView.motiCharge,
-          malaChargeNpr:   pricing.jyalaOwnerView.malaCharge,
-          otherChargeNpr:  pricing.jyalaOwnerView.otherCharge,
-          luxuryTaxNpr:    pricing.luxuryTaxNpr,
-          vatNpr:          pricing.vatNpr,
-          addonValueNpr:   pricing.addonValueNpr,
-          lineTotalNpr:    pricing.grandTotalNpr,
+          stoneChargeNpr: pricing.jyalaOwnerView.stoneCharge,
+          motiChargeNpr: pricing.jyalaOwnerView.motiCharge,
+          malaChargeNpr: pricing.jyalaOwnerView.malaCharge,
+          otherChargeNpr: pricing.jyalaOwnerView.otherCharge,
+          luxuryTaxNpr: pricing.luxuryTaxNpr,
+          vatNpr: pricing.vatNpr,
+          addonValueNpr: pricing.addonValueNpr,
+          lineTotalNpr: pricing.grandTotalNpr,
         });
       }
 
       const txn = await tx.transaction.create({
         data: {
-          billNumber:      billNum,
-          txType:          'RETURN',
-          customerId:      originalTx.customerId,
+          billNumber: billNum,
+          txType: 'RETURN',
+          customerId: originalTx.customerId,
           createdByUserId: userId,
-          relatedTxId:     originalTxId,
-          subTotalNpr:     refundTotal,
-          grandTotalNpr:   refundTotal,
-          paidAmountNpr:   refundTotal, // full refund
-          balanceNpr:      new Decimal(0),
-          paymentMethod:   refund.method,
+          relatedTxId: originalTxId,
+          subTotalNpr: refundTotal,
+          grandTotalNpr: refundTotal,
+          paidAmountNpr: refundTotal, // full refund
+          balanceNpr: new Decimal(0),
+          paymentMethod: refund.method,
           notes,
           lines: { create: lineData },
           payments: {
             create: {
               amountNpr: refundTotal,
-              method:    refund.method,
+              method: refund.method,
               reference: refund.reference,
-              notes:     refund.notes,
+              notes: refund.notes,
             },
           },
         },
@@ -271,7 +293,7 @@ export class SalesService {
       // ── Return stock items to IN_STOCK ────────────────────────────────────
       await tx.stockItem.updateMany({
         where: { id: { in: items.map((i) => i.stockItemId) } },
-        data:  { status: 'IN_STOCK' },
+        data: { status: 'IN_STOCK' },
       });
 
       return this.formatTxResponse(txn);
@@ -294,123 +316,198 @@ export class SalesService {
    */
   async createExchange(userId: string, dto: CreateExchangeDto) {
     const { customerId, itemsIn, itemsOut, payment, notes } = dto;
-    const exchangeGroupId = `EXG-${Date.now()}`;
+    const exchangeGroupId = `EXG-${randomBytes(8).toString('hex')}`;
 
     return this.prisma.$transaction(async (tx) => {
-      let inTotal  = new Decimal(0);
+      let inTotal = new Decimal(0);
       let outTotal = new Decimal(0);
 
       // ── Value items coming IN (at buy rate) ───────────────────────────────
-      const inLineData: any[] = [];
+      // ── Value items coming IN (at buy rate) ──────────────────────────────────
+const inLineData: any[] = [];
 
-      for (const inItem of itemsIn) {
-        if (inItem.stockItemId) {
-          // Shop item being returned
-          const stockItem = await tx.stockItem.findUnique({
-            where:   { id: inItem.stockItemId },
-            include: { metalType: true, addons: true },
-          });
-          if (!stockItem) throw new NotFoundException(`StockItem ${inItem.stockItemId} not found`);
+// Separate shop items from old gold upfront
+const shopItemsIn   = itemsIn.filter(i => i.stockItemId);
+const oldGoldItemsIn = itemsIn.filter(i => !i.stockItemId && i.oldGoldWeight && i.oldGoldMetalTypeId);
 
-          const buyRate = await this.getCurrentBuyRate(stockItem.metalTypeId!);
-          const pricing = this.stockService.calculatePrice(stockItem, {
-            ...buyRate,
-            sellRatePerGram: buyRate.buyRatePerGram,
-          });
+// Batch fetch all incoming shop stock items
+const inItemIds    = shopItemsIn.map(i => i.stockItemId) as string[];
+const inStockItems = inItemIds.length
+  ? await tx.stockItem.findMany({
+      where:   { id: { in: inItemIds } },
+      include: { metalType: true, addons: true },
+    })
+  : [];
 
-          inTotal = inTotal.plus(pricing.grandTotalNpr);
-          inLineData.push(this.buildLineData(stockItem, buyRate.buyRatePerGram, pricing));
+// Validate all found
+const inFoundIds = inStockItems.map(s => s.id);
+const inMissing  = inItemIds.filter(id => !inFoundIds.includes(id));
+if (inMissing.length) {
+  throw new NotFoundException(`StockItems not found: ${inMissing.join(', ')}`);
+}
 
-          await tx.stockItem.update({
-            where: { id: inItem.stockItemId },
-            data:  { status: 'RETURNED' },
-          });
+// Atomic status update — mark RETURNED only if currently SOLD
+const inReturnedResult = await tx.stockItem.updateMany({
+  where: {
+    id:     { in: inItemIds },
+    status: 'SOLD',            // can only return items that were sold
+  },
+  data: { status: 'RETURNED' },
+});
 
-        } else if (inItem.oldGoldWeight && inItem.oldGoldMetalTypeId) {
-          // Old gold — weighed and valued at buy rate
-          const buyRate   = await this.getCurrentBuyRate(inItem.oldGoldMetalTypeId);
-          const weightVal = WeightUtil.from(inItem.oldGoldWeight.value, inItem.oldGoldWeight.unit);
-          const metalVal  = weightVal.gram * Number(buyRate.buyRatePerGram);
+if (inReturnedResult.count !== inItemIds.length) {
+  throw new ConflictException(
+    'One or more incoming items cannot be returned — they are not in SOLD status.',
+  );
+}
 
-          inTotal = inTotal.plus(metalVal);
-          inLineData.push({
-            stockItemId:     null,
-            grossWeightGram: weightVal.gram,
-            jertyGram:       0,
-            billableGram:    weightVal.gram,
-            ratePerGram:     buyRate.buyRatePerGram,
-            metalValueNpr:   metalVal.toFixed(2),
-            jyalaNpr:        '0.00',
-            makingChargeNpr: '0.00',
-            stoneChargeNpr:  '0.00',
-            motiChargeNpr:   '0.00',
-            malaChargeNpr:   '0.00',
-            otherChargeNpr:  '0.00',
-            luxuryTaxNpr:    '0.00',
-            vatNpr:          '0.00',
-            addonValueNpr:   '0.00',
-            lineTotalNpr:    metalVal.toFixed(2),
-          });
-        }
-      }
+// Batch fetch buy rates for incoming items
+const inMetalTypeIds = [...new Set(inStockItems.map(s => s.metalTypeId).filter(Boolean))] as string[];
+const inRates        = await tx.dailyRate.findMany({
+  where: { metalTypeId: { in: inMetalTypeIds }, isCurrent: true },
+});
+const inRateMap = new Map(inRates.map(r => [r.metalTypeId, r]));
+
+// Price incoming shop items in memory
+for (const stockItem of inStockItems) {
+  const buyRate = inRateMap.get(stockItem.metalTypeId!);
+  if (!buyRate) {
+    throw new BadRequestException(
+      `No current rate for metal ${stockItem.metalTypeId}. Please set today's rate first.`,
+    );
+  }
+
+  const pricing = await this.stockService.calculatePrice(stockItem, {
+    ...buyRate,
+    sellRatePerGram: buyRate.buyRatePerGram,
+  });
+
+  inTotal = inTotal.plus(pricing.grandTotalNpr);
+  inLineData.push(this.buildLineData(stockItem, buyRate.buyRatePerGram, pricing));
+}
+
+// Handle old gold items — no DB lookup needed, just weight × rate
+for (const inItem of oldGoldItemsIn) {
+  const buyRate   = await this.getCurrentBuyRate(inItem.oldGoldMetalTypeId!);
+  const weightVal = WeightUtil.from(inItem.oldGoldWeight!.value, inItem.oldGoldWeight!.unit);
+  const metalVal  = weightVal.gram * Number(buyRate.buyRatePerGram);
+
+  inTotal = inTotal.plus(metalVal);
+  inLineData.push({
+    stockItemId:     null,
+    grossWeightGram: weightVal.gram,
+    jertyGram:       0,
+    billableGram:    weightVal.gram,
+    ratePerGram:     buyRate.buyRatePerGram,
+    metalValueNpr:   metalVal.toFixed(2),
+    jyalaNpr:        '0.00',
+    makingChargeNpr: '0.00',
+    stoneChargeNpr:  '0.00',
+    motiChargeNpr:   '0.00',
+    malaChargeNpr:   '0.00',
+    otherChargeNpr:  '0.00',
+    luxuryTaxNpr:    '0.00',
+    vatNpr:          '0.00',
+    addonValueNpr:   '0.00',
+    lineTotalNpr:    metalVal.toFixed(2),
+  });
+}
 
       // ── Price items going OUT (at sell rate) ──────────────────────────────
       const outLineData: any[] = [];
+      const outItemIds = itemsOut.map(i => i.stockItemId);
 
-      for (const outItem of itemsOut) {
-        const stockItem = await tx.stockItem.findUnique({
-          where:   { id: outItem.stockItemId },
-          include: { metalType: true, addons: true },
-        });
-        if (!stockItem) throw new NotFoundException(`StockItem ${outItem.stockItemId} not found`);
-        if (stockItem.status !== 'IN_STOCK' && stockItem.status !== 'RESERVED') {
-          throw new ConflictException(`StockItem ${stockItem.sku} is not available`);
+      // Batch fetch all outgoing stock items in one query
+      const outStockItems = await tx.stockItem.findMany({
+        where:   { id: { in: outItemIds } },
+        include: { metalType: true, addons: true },
+      });
+
+      // Validate all items were found
+      const outFoundIds = outStockItems.map(s => s.id);
+      const outMissing = outItemIds.filter(id => !outFoundIds.includes(id));
+      if (outMissing.length) {
+        throw new NotFoundException(`StockItems not found: ${outMissing.join(', ')}`);
+      }
+
+      // Atomic conditional update to mark items as SOLD
+      const outSoldResult = await tx.stockItem.updateMany({
+        where: {
+          id:     { in: outItemIds },
+          status: { in: ['IN_STOCK', 'RESERVED'] },
+        },
+        data: { status: 'SOLD' },
+      });
+
+      if (outSoldResult.count !== outItemIds.length) {
+        throw new ConflictException(
+          'One or more outgoing items are no longer available. Please review your selection.',
+        );
+      }
+
+      // Batch fetch all required rates for outgoing items
+      const outMetalTypeIds = [...new Set(outStockItems.map(s => s.metalTypeId).filter(Boolean))] as string[];
+      const outRates = await tx.dailyRate.findMany({
+        where: { metalTypeId: { in: outMetalTypeIds }, isCurrent: true },
+      });
+
+      // Map metalTypeId → rate for O(1) lookup
+      const outRateMap = new Map(outRates.map(r => [r.metalTypeId, r]));
+
+      // Validate all rates exist
+      for (const metalTypeId of outMetalTypeIds) {
+        if (!outRateMap.has(metalTypeId)) {
+          throw new BadRequestException(
+            `No current daily rate found for metal ${metalTypeId}. Please set today's rate first.`,
+          );
         }
+      }
 
-        const sellRate = await this.getCurrentSellRate(stockItem.metalTypeId!);
-        const pricing  = this.stockService.calculatePrice(stockItem, sellRate, {
+      // Price each outgoing item in memory
+      const outLineDtoMap = new Map(itemsOut.map(i => [i.stockItemId, i]));
+
+      for (const stockItem of outStockItems) {
+        const sellRate = outRateMap.get(stockItem.metalTypeId!)!;
+        const outItem = outLineDtoMap.get(stockItem.id)!;
+
+        const pricing = await this.stockService.calculatePrice(stockItem, sellRate, {
           jertyOverride: outItem.jertyOverride,
           jyalaOverride: outItem.jyalaOverride,
         });
 
         outTotal = outTotal.plus(pricing.grandTotalNpr);
         outLineData.push(this.buildLineData(stockItem, sellRate.sellRatePerGram, pricing));
-
-        await tx.stockItem.update({
-          where: { id: outItem.stockItemId },
-          data:  { status: 'SOLD' },
-        });
       }
 
       // ── Cash difference ───────────────────────────────────────────────────
-      const cashDiff    = outTotal.minus(inTotal); // positive = customer pays
-      const billNum     = await this.billNumber.generate(tx);
-      const paidAmount  = new Decimal(payment.amountNpr);
-      const balance     = cashDiff.minus(paidAmount);
+      const cashDiff = outTotal.minus(inTotal); // positive = customer pays
+      const billNum = await this.billNumber.generate(tx);
+      const paidAmount = new Decimal(payment.amountNpr);
+      const balance = cashDiff.minus(paidAmount);
 
       const txn = await tx.transaction.create({
         data: {
-          billNumber:      billNum,
-          txType:          'EXCHANGE',
+          billNumber: billNum,
+          txType: 'EXCHANGE',
           customerId,
           createdByUserId: userId,
           exchangeGroupId,
-          subTotalNpr:     outTotal,
-          grandTotalNpr:   cashDiff,
-          paidAmountNpr:   paidAmount,
-          balanceNpr:      balance,
-          paymentMethod:   payment.method,
+          subTotalNpr: outTotal,
+          grandTotalNpr: cashDiff,
+          paidAmountNpr: paidAmount,
+          balanceNpr: balance,
+          paymentMethod: payment.method,
           notes,
           lines: {
             create: [
-              ...inLineData.filter(l => l.stockItemId).map(l => ({ ...l })),
+              ...inLineData,
               ...outLineData,
             ],
           },
           payments: {
             create: {
               amountNpr: paidAmount,
-              method:    payment.method,
+              method: payment.method,
               reference: payment.reference,
             },
           },
@@ -421,7 +518,7 @@ export class SalesService {
       return {
         ...this.formatTxResponse(txn),
         exchangeSummary: {
-          itemsInValueNpr:  inTotal.toFixed(2),
+          itemsInValueNpr: inTotal.toFixed(2),
           itemsOutValueNpr: outTotal.toFixed(2),
           cashDifferenceNpr: cashDiff.toFixed(2),
           customerPays: cashDiff.greaterThan(0),
@@ -438,39 +535,39 @@ export class SalesService {
     const { customerId, relatedSaleTxId, weight, metalTypeId, buyRatePerGram, payment, notes } = dto;
 
     const weightVal = WeightUtil.from(weight.value, weight.unit);
-    const totalNpr  = weightVal.gram * buyRatePerGram;
+    const totalNpr = weightVal.gram * buyRatePerGram;
 
     return this.prisma.$transaction(async (tx) => {
-      const billNum    = await this.billNumber.generate(tx);
+      const billNum = await this.billNumber.generate(tx);
       const paidAmount = new Decimal(payment.amountNpr);
 
       const txn = await tx.transaction.create({
         data: {
-          billNumber:      billNum,
-          txType:          'BUY_BACK',
+          billNumber: billNum,
+          txType: 'BUY_BACK',
           customerId,
           createdByUserId: userId,
-          relatedTxId:     relatedSaleTxId,
-          subTotalNpr:     totalNpr,
-          grandTotalNpr:   totalNpr,
-          paidAmountNpr:   paidAmount,
-          balanceNpr:      new Decimal(totalNpr).minus(paidAmount),
-          paymentMethod:   payment.method,
+          relatedTxId: relatedSaleTxId,
+          subTotalNpr: totalNpr,
+          grandTotalNpr: totalNpr,
+          paidAmountNpr: paidAmount,
+          balanceNpr: new Decimal(totalNpr).minus(paidAmount),
+          paymentMethod: payment.method,
           notes,
           payments: {
             create: {
               amountNpr: paidAmount,
-              method:    payment.method,
+              method: payment.method,
               reference: payment.reference,
             },
           },
           buybackRecord: {
             create: {
-              customerId:      customerId,
+              customerId: customerId,
               relatedSaleTxId,
               metalWeightGram: weightVal.gram,
               metalWeightTola: weightVal.tola,
-              metalWeightLal:  weightVal.lal,
+              metalWeightLal: weightVal.lal,
               buyRatePerGram,
               totalNpr,
             },
@@ -491,28 +588,28 @@ export class SalesService {
     const { customerId, weight, metalTypeId, buyRatePerGram, payment, notes } = dto;
 
     const weightVal = WeightUtil.from(weight.value, weight.unit);
-    const totalNpr  = weightVal.gram * buyRatePerGram;
+    const totalNpr = weightVal.gram * buyRatePerGram;
 
     return this.prisma.$transaction(async (tx) => {
-      const billNum    = await this.billNumber.generate(tx);
+      const billNum = await this.billNumber.generate(tx);
       const paidAmount = new Decimal(payment.amountNpr);
 
       const txn = await tx.transaction.create({
         data: {
-          billNumber:      billNum,
-          txType:          'OLD_GOLD',
+          billNumber: billNum,
+          txType: 'OLD_GOLD',
           customerId,
           createdByUserId: userId,
-          subTotalNpr:     totalNpr,
-          grandTotalNpr:   totalNpr,
-          paidAmountNpr:   paidAmount,
-          balanceNpr:      new Decimal(totalNpr).minus(paidAmount),
-          paymentMethod:   payment.method,
+          subTotalNpr: totalNpr,
+          grandTotalNpr: totalNpr,
+          paidAmountNpr: paidAmount,
+          balanceNpr: new Decimal(totalNpr).minus(paidAmount),
+          paymentMethod: payment.method,
           notes,
           payments: {
             create: {
               amountNpr: paidAmount,
-              method:    payment.method,
+              method: payment.method,
               reference: payment.reference,
             },
           },
@@ -521,7 +618,7 @@ export class SalesService {
               customerId,
               metalWeightGram: weightVal.gram,
               metalWeightTola: weightVal.tola,
-              metalWeightLal:  weightVal.lal,
+              metalWeightLal: weightVal.lal,
               buyRatePerGram,
               totalNpr,
             },
@@ -543,36 +640,38 @@ export class SalesService {
    * Updates paidAmountNpr and balanceNpr on the transaction.
    */
   async addPayment(txId: string, dto: AddPaymentDto) {
-    const txn = await this.prisma.transaction.findUnique({ where: { id: txId } });
-    if (!txn) throw new NotFoundException(`Transaction ${txId} not found`);
-
-    if (txn.balanceNpr.equals(0)) {
-      throw new BadRequestException('This transaction is already fully paid');
-    }
-
-    const newPaid   = new Decimal(txn.paidAmountNpr).plus(dto.payment.amountNpr);
-    const newBalance = new Decimal(txn.grandTotalNpr).minus(newPaid);
-
-    if (newBalance.lessThan(0)) {
-      throw new BadRequestException(
-        `Payment of NPR ${dto.payment.amountNpr} exceeds remaining balance of NPR ${txn.balanceNpr}`,
-      );
-    }
-
     return this.prisma.$transaction(async (tx) => {
+      // Re-read inside transaction so concurrent payments
+      // see each other's writes before checking balance
+      const txn = await tx.transaction.findUnique({ where: { id: txId } });
+      if (!txn) throw new NotFoundException(`Transaction ${txId} not found`);
+
+      if (txn.balanceNpr.equals(0)) {
+        throw new BadRequestException('This transaction is already fully paid');
+      }
+
+      const newPaid = new Decimal(txn.paidAmountNpr).plus(dto.payment.amountNpr);
+      const newBalance = new Decimal(txn.grandTotalNpr).minus(newPaid);
+
+      if (newBalance.lessThan(0)) {
+        throw new BadRequestException(
+          `Payment of NPR ${dto.payment.amountNpr} exceeds remaining balance of NPR ${txn.balanceNpr}`,
+        );
+      }
+
       await tx.paymentRecord.create({
         data: {
           transactionId: txId,
-          amountNpr:     dto.payment.amountNpr,
-          method:        dto.payment.method,
-          reference:     dto.payment.reference,
-          notes:         dto.payment.notes,
+          amountNpr: dto.payment.amountNpr,
+          method: dto.payment.method,
+          reference: dto.payment.reference,
+          notes: dto.payment.notes,
         },
       });
 
       return tx.transaction.update({
         where: { id: txId },
-        data:  { paidAmountNpr: newPaid, balanceNpr: newBalance },
+        data: { paidAmountNpr: newPaid, balanceNpr: newBalance },
         include: this.fullTxInclude(),
       });
     });
@@ -584,23 +683,23 @@ export class SalesService {
 
   async listTransactions(query: SalesQueryDto) {
     const { txType, customerId, from, to, hasBalance, search, page = 1, limit = 20 } = query;
-    const skip  = (page - 1) * limit;
+    const skip = (page - 1) * limit;
     const where: any = {};
 
-    if (txType)     where.txType     = txType;
+    if (txType) where.txType = txType;
     if (customerId) where.customerId = customerId;
     if (hasBalance) where.balanceNpr = { gt: 0 };
 
     if (from || to) {
       where.createdAt = {};
       if (from) where.createdAt.gte = new Date(from);
-      if (to)   where.createdAt.lte = new Date(to);
+      if (to) where.createdAt.lte = new Date(to);
     }
 
     if (search) {
       where.OR = [
         { billNumber: { contains: search, mode: 'insensitive' } },
-        { customer:   { name: { contains: search, mode: 'insensitive' } } },
+        { customer: { name: { contains: search, mode: 'insensitive' } } },
       ];
     }
 
@@ -609,11 +708,11 @@ export class SalesService {
         where,
         orderBy: { createdAt: 'desc' },
         skip,
-        take:    limit,
+        take: limit,
         include: {
-          customer:  { select: { id: true, name: true, phoneHint: true } },
+          customer: { select: { id: true, name: true, phoneHint: true } },
           createdBy: { select: { id: true, name: true } },
-          _count:    { select: { lines: true } },
+          _count: { select: { lines: true } },
         },
       }),
       this.prisma.transaction.count({ where }),
@@ -627,7 +726,7 @@ export class SalesService {
 
   async getTransaction(id: string) {
     const txn = await this.prisma.transaction.findUnique({
-      where:   { id },
+      where: { id },
       include: this.fullTxInclude(),
     });
     if (!txn) throw new NotFoundException(`Transaction ${id} not found`);
@@ -636,7 +735,7 @@ export class SalesService {
 
   async getTransactionByBillNumber(billNumber: string) {
     const txn = await this.prisma.transaction.findUnique({
-      where:   { billNumber },
+      where: { billNumber },
       include: this.fullTxInclude(),
     });
     if (!txn) throw new NotFoundException(`Bill ${billNumber} not found`);
@@ -649,7 +748,7 @@ export class SalesService {
 
   private async getCurrentSellRate(metalTypeId: string) {
     const rate = await this.prisma.dailyRate.findFirst({
-      where:   { metalTypeId, isCurrent: true },
+      where: { metalTypeId, isCurrent: true },
       orderBy: { effectiveDate: 'desc' },
     });
     if (!rate) {
@@ -662,7 +761,7 @@ export class SalesService {
 
   private async getCurrentBuyRate(metalTypeId: string) {
     const rate = await this.prisma.dailyRate.findFirst({
-      where:   { metalTypeId, isCurrent: true },
+      where: { metalTypeId, isCurrent: true },
       orderBy: { effectiveDate: 'desc' },
     });
     if (!rate) {
@@ -675,43 +774,43 @@ export class SalesService {
 
   private buildLineData(stockItem: any, ratePerGram: any, pricing: any) {
     return {
-      stockItemId:     stockItem.id,
+      stockItemId: stockItem.id,
       grossWeightGram: Number(stockItem.grossWeightGram),
-      jertyGram:       parseFloat(pricing.jertyWeight.raw.gram.toFixed(4)),
-      billableGram:    parseFloat(pricing.billableWeight.raw.gram.toFixed(4)),
+      jertyGram: parseFloat(pricing.jertyWeight.raw.gram.toFixed(4)),
+      billableGram: parseFloat(pricing.billableWeight.raw.gram.toFixed(4)),
       ratePerGram,
-      metalValueNpr:   pricing.metalValueNpr,
-      jyalaNpr:        pricing.jyalaCustomerView,
+      metalValueNpr: pricing.metalValueNpr,
+      jyalaNpr: pricing.jyalaCustomerView,
       makingChargeNpr: pricing.jyalaOwnerView.makingCharge,
-      stoneChargeNpr:  pricing.jyalaOwnerView.stoneCharge,
-      motiChargeNpr:   pricing.jyalaOwnerView.motiCharge,
-      malaChargeNpr:   pricing.jyalaOwnerView.malaCharge,
-      otherChargeNpr:  pricing.jyalaOwnerView.otherCharge,
-      luxuryTaxNpr:    pricing.luxuryTaxNpr,
-      vatNpr:          pricing.vatNpr,
-      addonValueNpr:   pricing.addonValueNpr,
-      lineTotalNpr:    pricing.grandTotalNpr,
+      stoneChargeNpr: pricing.jyalaOwnerView.stoneCharge,
+      motiChargeNpr: pricing.jyalaOwnerView.motiCharge,
+      malaChargeNpr: pricing.jyalaOwnerView.malaCharge,
+      otherChargeNpr: pricing.jyalaOwnerView.otherCharge,
+      luxuryTaxNpr: pricing.luxuryTaxNpr,
+      vatNpr: pricing.vatNpr,
+      addonValueNpr: pricing.addonValueNpr,
+      lineTotalNpr: pricing.grandTotalNpr,
     };
   }
 
   private fullTxInclude() {
     return {
-      customer:      { select: { id: true, name: true, phoneHint: true } },
-      createdBy:     { select: { id: true, name: true } },
-      dailyRate:     true,
-      lines:         {
+      customer: { select: { id: true, name: true, phoneHint: true } },
+      createdBy: { select: { id: true, name: true } },
+      dailyRate: true,
+      lines: {
         include: {
           stockItem: {
             include: {
-              category:  { select: { id: true, name: true } },
+              category: { select: { id: true, name: true } },
               metalType: { select: { id: true, name: true } },
             },
           },
         },
       },
-      payments:      true,
+      payments: true,
       buybackRecord: true,
-      relatedTx:     { select: { id: true, billNumber: true, txType: true } },
+      relatedTx: { select: { id: true, billNumber: true, txType: true } },
     };
   }
 
@@ -724,53 +823,54 @@ export class SalesService {
   private formatTxResponse(txn: any) {
     if (!txn) return txn;
 
-    const ownerLines    = txn.lines?.map((line: any) => ({
+    const ownerLines = txn.lines?.map((line: any) => ({
       ...line,
       weight: WeightUtil.forBill(Number(line.grossWeightGram)),
       jyalaOwnerView: {
         makingCharge: line.makingChargeNpr,
-        stoneCharge:  line.stoneChargeNpr,
-        motiCharge:   line.motiChargeNpr,
-        malaCharge:   line.malaChargeNpr,
-        otherCharge:  line.otherChargeNpr,
-        total:        line.jyalaNpr,
+        stoneCharge: line.stoneChargeNpr,
+        motiCharge: line.motiChargeNpr,
+        malaCharge: line.malaChargeNpr,
+        otherCharge: line.otherChargeNpr,
+        total: line.jyalaNpr,
       },
     }));
 
     const customerLines = txn.lines?.map((line: any) => ({
-      sku:          line.stockItem?.sku,
-      category:     line.stockItem?.category?.name,
-      metalType:    line.stockItem?.metalType?.name,
-      weight:       WeightUtil.forBill(Number(line.grossWeightGram)),
-      metalValue:   line.metalValueNpr,
-      jyala:        line.jyalaNpr,         // single line — no breakdown
-      luxuryTax:    line.luxuryTaxNpr,
-      vat:          line.vatNpr,
-      lineTotal:    line.lineTotalNpr,
+      sku: line.stockItem?.sku,
+      category: line.stockItem?.category?.name,
+      metalType: line.stockItem?.metalType?.name,
+      weight: WeightUtil.forBill(Number(line.grossWeightGram)),
+      metalValue: line.metalValueNpr,
+      jyala: line.jyalaNpr,         // single line — no breakdown
+      luxuryTax: line.luxuryTaxNpr,
+      vat: line.vatNpr,
+      lineTotal: line.lineTotalNpr,
     }));
 
     return {
       ...txn,
+      type: txn.txType,   // consumer-friendly alias
       ownerBill: {
-        billNumber:   txn.billNumber,
-        date:         txn.createdAt,
-        customer:     txn.customer,
-        lines:        ownerLines,
-        subTotal:     txn.subTotalNpr,
-        grandTotal:   txn.grandTotalNpr,
-        paid:         txn.paidAmountNpr,
-        balance:      txn.balanceNpr,
-        payments:     txn.payments,
+        billNumber: txn.billNumber,
+        date: txn.createdAt,
+        customer: txn.customer,
+        lines: ownerLines,
+        subTotal: txn.subTotalNpr,
+        grandTotal: txn.grandTotalNpr,
+        paid: txn.paidAmountNpr,
+        balance: txn.balanceNpr,
+        payments: txn.payments,
       },
       customerBill: {
-        billNumber:   txn.billNumber,
-        date:         txn.createdAt,
-        customer:     txn.customer,
-        lines:        customerLines,
-        subTotal:     txn.subTotalNpr,
-        grandTotal:   txn.grandTotalNpr,
-        paid:         txn.paidAmountNpr,
-        balance:      txn.balanceNpr,
+        billNumber: txn.billNumber,
+        date: txn.createdAt,
+        customer: txn.customer,
+        lines: customerLines,
+        subTotal: txn.subTotalNpr,
+        grandTotal: txn.grandTotalNpr,
+        paid: txn.paidAmountNpr,
+        balance: txn.balanceNpr,
       },
     };
   }

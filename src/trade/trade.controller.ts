@@ -30,7 +30,7 @@ import {
   TradePartyQueryDto,
   TradeQueryDto,
 } from './dto/trade.dto';
-import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+// import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -39,10 +39,10 @@ import { CurrentUser } from '../common/decorators/current-user.decorator';
 
 @ApiTags('Trade Parties')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(RolesGuard)
 @Controller('trade-parties')
 export class TradePartyController {
-  constructor(private readonly tradeService: TradeService) {}
+  constructor(private readonly tradeService: TradeService) { }
 
   /**
    * POST /trade-parties
@@ -133,10 +133,10 @@ export class TradePartyController {
 
 @ApiTags('Trades')
 @ApiBearerAuth()
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(RolesGuard)
 @Controller('trades')
 export class TradeController {
-  constructor(private readonly tradeService: TradeService) {}
+  constructor(private readonly tradeService: TradeService) { }
 
   /**
    * POST /trades

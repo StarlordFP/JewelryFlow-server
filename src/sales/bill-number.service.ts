@@ -4,11 +4,21 @@ import { PrismaService } from '../prisma/prisma.service';
 /**
  * BillNumberService
  *
- * Generates sequential bill numbers: BILL-0001, BILL-0002 ...
+ * Generates sequential bill numbers: BILL-000001, BILL-000002 …
  * Never resets — strictly sequential across all time.
- * The bill date and daily rate are stored separately on the Transaction.
- *
  * Safe inside prisma.$transaction — accepts a tx client.
+ *
+ * Implementation: PostgreSQL sequence `bill_number_seq`
+ *
+ * WHY a sequence instead of count()+1:
+ *  - count()+1 is NOT atomic: two concurrent requests read the same count,
+ *    both generate the same bill number → unique constraint violation.
+ *  - count()+1 breaks permanently if any transaction is ever deleted
+ *    (count shrinks, new numbers collide with existing bills).
+ *  - nextval() is atomic at the database level — guaranteed unique under
+ *    any concurrency, never repeats, never breaks on row deletion.
+ *
+ * Migration: prisma/migrations/20260530000001_add_bill_number_sequence/migration.sql
  */
 @Injectable()
 export class BillNumberService {
@@ -17,9 +27,13 @@ export class BillNumberService {
   async generate(tx?: any): Promise<string> {
     const client = tx ?? this.prisma;
 
-    // Count existing transactions to derive next number
-    const count = await client.transaction.count();
-    const seq   = String(count + 1).padStart(4, '0');
+    // nextval() is atomic — the DB increments and returns the value in a
+    // single operation. No two callers ever receive the same number.
+    const result = await client.$queryRaw<[{ nextval: bigint }]>`
+      SELECT nextval('bill_number_seq')
+    `;
+
+    const seq = String(Number(result[0].nextval)).padStart(6, '0');
     return `BILL-${seq}`;
   }
 }

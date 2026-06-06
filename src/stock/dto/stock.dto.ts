@@ -331,6 +331,60 @@ export class PricePreviewDto {
   dailyRateId?: string;
 }
 
+// ─── STANDALONE PRICE PREVIEW ────────────────────────────────────────────────
+// Preview price before a stock item exists (e.g. while adding stock)
+
+export class StandalonePricePreviewDto {
+  /** Metal type ID to look up today's rate */
+  @ApiProperty({ description: 'Metal type ID', example: 'clp456abc' })
+  @IsString()
+  metalTypeId!: string;
+
+  /** Category ID (for context, not used in pricing) */
+  @ApiPropertyOptional({ description: 'Category ID', example: 'clp123xyz' })
+  @IsOptional()
+  @IsString()
+  categoryId?: string;
+
+  /** Gross weight of the item */
+  @ApiProperty({ description: 'Gross weight', type: WeightInputDto })
+  @ValidateNested()
+  @Type(() => WeightInputDto)
+  grossWeight!: WeightInputDto;
+
+  /** Jerty weight (optional — defaults to 0) */
+  @ApiPropertyOptional({ description: 'Jerty weight', type: WeightInputDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => WeightInputDto)
+  jertyWeight?: WeightInputDto;
+
+  /** Jyala breakdown (optional — defaults to all zeros) */
+  @ApiPropertyOptional({ description: 'Jyala breakdown', type: JyalaBreakdownDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => JyalaBreakdownDto)
+  jyalaBreakdown?: JyalaBreakdownDto;
+
+  /** Apply 2% luxury tax on metal value */
+  @ApiPropertyOptional({ description: 'Apply luxury tax', example: false })
+  @IsOptional()
+  @IsBoolean()
+  applyLuxuryTax?: boolean;
+
+  /** Apply 13% VAT on total jyala */
+  @ApiPropertyOptional({ description: 'Apply VAT', example: false })
+  @IsOptional()
+  @IsBoolean()
+  applyVat?: boolean;
+
+  /** Use a specific daily rate ID instead of today's current rate */
+  @ApiPropertyOptional({ description: 'Specific daily rate ID', example: 'clp456abc' })
+  @IsOptional()
+  @IsString()
+  dailyRateId?: string;
+}
+
 // ─── QUERY / FILTER ──────────────────────────────────────────────────────────
 
 export class StockQueryDto {
@@ -399,4 +453,28 @@ export class StockQueryDto {
   @ApiPropertyOptional({ description: 'Items per page', example: 20, default: 20 })
   @IsOptional()
   limit?: number;
+}
+
+// ─── CATEGORY DTOs ────────────────────────────────────────────────────────────
+
+export class CreateCategoryDto {
+  @ApiProperty({ description: 'Category name', example: 'Ring' })
+  @IsString()
+  @MinLength(2)
+  @MaxLength(100)
+  name!: string;
+}
+
+export class UpdateCategoryDto {
+  @ApiPropertyOptional({ description: 'Category name', example: 'Ring' })
+  @IsOptional()
+  @IsString()
+  @MinLength(2)
+  @MaxLength(100)
+  name?: string;
+
+  @ApiPropertyOptional({ description: 'Active status', example: true })
+  @IsOptional()
+  @IsBoolean()
+  isActive?: boolean;
 }

@@ -3,6 +3,7 @@
     "module": "commonjs",
     "target": "ES2021",
     "lib": ["ES2021"],
+    "types": ["jest", "node"],
     "declaration": true,
     "outDir": "./dist",
     "rootDir": "./src",
@@ -30,5 +31,5 @@
     "noFallthroughCasesInSwitch": true
   },
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "test", "**/*spec.ts"]
+  "exclude": ["node_modules", "dist", "test"]
 }

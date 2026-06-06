@@ -23,17 +23,17 @@ import {
   ResolveDisputeDto,
   ProductionOrderQueryDto,
 } from './dto/karigar.dto';
-import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+// import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 
 // ─── KARIGAR CONTROLLER ───────────────────────────────────────────────────────
 
 @ApiTags('Karigar')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(RolesGuard)
 @Controller('karigars')
 export class KarigarController {
-  constructor(private readonly karigarService: KarigarService) {}
+  constructor(private readonly karigarService: KarigarService) { }
 
   @Post()
   @Roles('OWNER', 'MANAGER')
@@ -69,10 +69,10 @@ export class KarigarController {
 // ─── PRODUCTION ORDER CONTROLLER ─────────────────────────────────────────────
 
 @ApiTags('Karigar')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(RolesGuard)
 @Controller('production-orders')
 export class ProductionOrderController {
-  constructor(private readonly karigarService: KarigarService) {}
+  constructor(private readonly karigarService: KarigarService) { }
 
   /** POST /production-orders — open a new production order */
   @Post()
@@ -107,10 +107,10 @@ export class ProductionOrderController {
 // ─── PRODUCTION ISSUE CONTROLLER ─────────────────────────────────────────────
 
 @ApiTags('Karigar')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(RolesGuard)
 @Controller('production-issues')
 export class ProductionIssueController {
-  constructor(private readonly karigarService: KarigarService) {}
+  constructor(private readonly karigarService: KarigarService) { }
 
   /**
    * POST /production-issues
@@ -127,10 +127,10 @@ export class ProductionIssueController {
 // ─── PRODUCTION RETURN CONTROLLER ────────────────────────────────────────────
 
 @ApiTags('Karigar')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(RolesGuard)
 @Controller('production-returns')
 export class ProductionReturnController {
-  constructor(private readonly karigarService: KarigarService) {}
+  constructor(private readonly karigarService: KarigarService) { }
 
   /**
    * POST /production-returns
@@ -148,10 +148,10 @@ export class ProductionReturnController {
 // ─── KARIGAR PAYMENT CONTROLLER ──────────────────────────────────────────────
 
 @ApiTags('Karigar')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(RolesGuard)
 @Controller('karigar-payments')
 export class KarigarPaymentController {
-  constructor(private readonly karigarService: KarigarService) {}
+  constructor(private readonly karigarService: KarigarService) { }
 
   /**
    * POST /karigar-payments
@@ -168,10 +168,10 @@ export class KarigarPaymentController {
 // ─── KARIGAR DISPUTE CONTROLLER ──────────────────────────────────────────────
 
 @ApiTags('Karigar')
-@UseGuards(JwtAuthGuard, RolesGuard)
+@UseGuards(RolesGuard)
 @Controller('karigar-disputes')
 export class KarigarDisputeController {
-  constructor(private readonly karigarService: KarigarService) {}
+  constructor(private readonly karigarService: KarigarService) { }
 
   /**
    * GET /karigar-disputes

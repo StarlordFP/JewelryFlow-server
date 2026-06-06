@@ -13,6 +13,7 @@ import { Request, Response } from 'express';
  *
  * Returns every error in a consistent envelope:
  * {
+ *   success:    false,
  *   statusCode: 404,
  *   error:      "Not Found",
  *   message:    "Customer abc123 not found",
@@ -64,6 +65,7 @@ export class HttpExceptionFilter implements ExceptionFilter {
     }
 
     response.status(status).json({
+      success: false,
       statusCode: status,
       error,
       message,
