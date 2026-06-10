@@ -16,6 +16,9 @@ import { KarigarModule } from './karigar/karigar.module';
 import { HttpExceptionFilter } from './common/filters/http-exception.filter';
 import { TransformInterceptor } from './common/interceptors/transform.interceptor';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
+import { DashboardModule } from './dashboard/dashboard.module';
+import { LedgerModule } from './ledger/ledger.module';
+import { AuditModule } from './audit/audit.module';
 
 @Module({
   imports: [
@@ -49,6 +52,9 @@ import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
     RatesModule,
     PurchaseModule,
     KarigarModule,
+    DashboardModule,
+    LedgerModule,
+    AuditModule,
   ],
 
   providers: [
