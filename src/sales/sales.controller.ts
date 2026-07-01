@@ -148,16 +148,6 @@ export class SalesController {
   }
 
   /**
-   * GET /sales/:id
-   * Full transaction detail with ownerBill and customerBill views.
-   */
-  @Get(':id')
-  @Roles('OWNER', 'MANAGER', 'STAFF')
-  findOne(@Param('id') id: string) {
-    return this.salesService.getTransaction(id);
-  }
-
-  /**
    * GET /sales/bill/:billNumber
    * Look up transaction by bill number (e.g. BILL-0042).
    */
@@ -165,5 +155,15 @@ export class SalesController {
   @Roles('OWNER', 'MANAGER', 'STAFF')
   findByBillNumber(@Param('billNumber') billNumber: string) {
     return this.salesService.getTransactionByBillNumber(billNumber);
+  }
+
+  /**
+   * GET /sales/:id
+   * Full transaction detail with ownerBill and customerBill views.
+   */
+  @Get(':id')
+  @Roles('OWNER', 'MANAGER', 'STAFF')
+  findOne(@Param('id') id: string) {
+    return this.salesService.getTransaction(id);
   }
 }

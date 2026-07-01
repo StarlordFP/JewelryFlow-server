@@ -3,6 +3,7 @@ import { INestApplication, ValidationPipe } from '@nestjs/common';
 import request from 'supertest';
 import { AppModule } from '../app.module';
 import { PrismaService } from '../prisma/prisma.service';
+import { assertIntegrationTestDatabase } from '../test-setup/assert-test-database';
 
 describe('Sales Integration Tests (e2e)', () => {
   let app: INestApplication;
@@ -42,6 +43,7 @@ describe('Sales Integration Tests (e2e)', () => {
   }
 
   beforeAll(async () => {
+    assertIntegrationTestDatabase();
     const moduleRef: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();
@@ -99,7 +101,9 @@ describe('Sales Integration Tests (e2e)', () => {
   });
 
   afterAll(async () => {
-    // Clean up in child→parent order
+    await prisma.buybackRecord.deleteMany({
+      where: { transaction: { billNumber: { startsWith: 'BILL-' } } },
+    });
     await prisma.paymentRecord.deleteMany({
       where: { transaction: { billNumber: { startsWith: 'BILL-' } } },
     });

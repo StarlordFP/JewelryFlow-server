@@ -3,6 +3,7 @@ import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { AppModule } from '../app.module';
 import { PrismaService } from '../prisma/prisma.service';
 import { KarigarService } from './karigar.service';
+import { assertIntegrationTestDatabase } from '../test-setup/assert-test-database';
 
 const WEIGHT_EPSILON = 0.001;
 
@@ -27,6 +28,7 @@ describe('Production order line pool concurrency (integration)', () => {
   const RAW_DEFICIT = 3;
 
   beforeAll(async () => {
+    assertIntegrationTestDatabase();
     const moduleRef: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();

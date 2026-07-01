@@ -3,6 +3,7 @@ import { INestApplication, ValidationPipe } from '@nestjs/common';
 import request from 'supertest';
 import { AppModule } from '../app.module';
 import { PrismaService } from '../prisma/prisma.service';
+import { assertIntegrationTestDatabase } from '../test-setup/assert-test-database';
 
 describe('Stock Integration Tests (e2e)', () => {
   let app: INestApplication;
@@ -16,6 +17,7 @@ describe('Stock Integration Tests (e2e)', () => {
   let dailyRateId: string;
 
   beforeAll(async () => {
+    assertIntegrationTestDatabase();
     const moduleRef: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();

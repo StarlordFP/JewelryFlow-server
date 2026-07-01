@@ -196,6 +196,11 @@ export class CreateExchangeDto {
   @IsString()
   customerId?: string;
 
+  /** Original SELL bill when items-in came from a past shop sale (optional). */
+  @IsOptional()
+  @IsString()
+  relatedTxId?: string;
+
   /** Item(s) customer is returning/bringing in */
   @IsArray()
   @ValidateNested({ each: true })

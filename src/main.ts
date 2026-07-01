@@ -2,11 +2,20 @@ import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
+import helmet from 'helmet';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const logger = new Logger('Bootstrap');
+
+  app.use(
+    helmet({
+      contentSecurityPolicy: process.env.NODE_ENV === 'production'
+        ? undefined
+        : false,
+    }),
+  );
 
   app.setGlobalPrefix('api/v1');
 
@@ -20,7 +29,12 @@ async function bootstrap() {
   );
 
   // ── CORS — driven by env, not hardcoded ──────────────────────────────────
-  const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') ?? [];
+  const rawOrigins = process.env.ALLOWED_ORIGINS?.split(',').filter(Boolean);
+  const allowedOrigins = rawOrigins?.length
+    ? rawOrigins
+    : ['http://localhost:5173', 'http://localhost:3000'];
+  // ^ local install fallback — frontend dev ports. In production,
+  // ALLOWED_ORIGINS must be set to the actual deployed frontend URL.
   app.enableCors({
     origin: allowedOrigins,
     credentials: true,

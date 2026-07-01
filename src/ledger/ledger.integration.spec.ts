@@ -3,6 +3,7 @@ import { INestApplication, ValidationPipe } from '@nestjs/common';
 import request from 'supertest';
 import { AppModule } from '../app.module';
 import { PrismaService } from '../prisma/prisma.service';
+import { assertIntegrationTestDatabase } from '../test-setup/assert-test-database';
 
 /**
  * Integration tests for the Ledger profit / rate-comparison report.
@@ -40,6 +41,7 @@ describe('Ledger Profit Report Integration Tests (e2e)', () => {
   const WEIGHT_GRAM = 10;
 
   beforeAll(async () => {
+    assertIntegrationTestDatabase();
     const moduleRef: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();

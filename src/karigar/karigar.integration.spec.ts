@@ -3,6 +3,7 @@ import { INestApplication, ValidationPipe } from '@nestjs/common';
 import request from 'supertest';
 import { AppModule } from '../app.module';
 import { PrismaService } from '../prisma/prisma.service';
+import { assertIntegrationTestDatabase } from '../test-setup/assert-test-database';
 
 describe('Karigar Integration Tests (e2e)', () => {
   let app: INestApplication;
@@ -17,6 +18,7 @@ describe('Karigar Integration Tests (e2e)', () => {
   let disputeId: string;
 
   beforeAll(async () => {
+    assertIntegrationTestDatabase();
     const moduleRef: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
     }).compile();

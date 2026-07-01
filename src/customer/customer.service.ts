@@ -245,6 +245,9 @@ export class CustomerService {
         orderBy: { createdAt: 'desc' },
         skip,
         take: limit,
+        include: {
+          relatedTx: { select: { id: true, billNumber: true, txType: true } },
+        },
       }),
       this.prisma.transaction.count({ where: { customerId: id } }),
     ]);

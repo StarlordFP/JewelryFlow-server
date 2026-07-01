@@ -198,6 +198,7 @@ model MetalType {
   karigarDisputes   KarigarDispute[]   @relation("DisputeMetal")
   productionOrderLines ProductionOrderLine[]
   productionOrderMetalPools ProductionOrderMetalPool[]
+  buybackRecords    BuybackRecord[]
 
   @@map("metal_types")
 }
@@ -519,6 +520,7 @@ model StockItem {
   purchaseOrderLine    PurchaseOrderLine?
   addons               StockItemAddon[]
   transactionLines     TransactionLine[]
+  buybackRecord        BuybackRecord?
 
   // Self-relation: which item this was remade into (nullable on source items)
   remadeIntoStockItem  StockItem?         @relation("StockRemake", fields: [remadeIntoStockItemId], references: [id])
@@ -1027,6 +1029,8 @@ model BuybackRecord {
   transactionId   String  @unique
   customerId      String?
   relatedSaleTxId String?
+  stockItemId     String? @unique
+  metalTypeId     String?
   metalWeightGram Decimal @db.Decimal(10, 4)
   metalWeightTola Decimal @db.Decimal(10, 4)
   metalWeightLal  Decimal @db.Decimal(10, 4)
@@ -1035,6 +1039,8 @@ model BuybackRecord {
 
   transaction Transaction @relation(fields: [transactionId], references: [id])
   customer    Customer?   @relation(fields: [customerId], references: [id])
+  stockItem   StockItem?  @relation(fields: [stockItemId], references: [id])
+  metalType   MetalType?  @relation(fields: [metalTypeId], references: [id])
 
   @@map("buyback_records")
 }

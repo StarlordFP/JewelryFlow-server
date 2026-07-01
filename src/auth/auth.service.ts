@@ -27,7 +27,7 @@ import {
 
 const SALT_ROUNDS = 12;
 const REFRESH_EXPIRY = '7d';
-const ACCESS_EXPIRY = '8h';
+const ACCESS_EXPIRY = '15m';
 const OTP_EXPIRY_MINUTES = 15;
 
 @Injectable()

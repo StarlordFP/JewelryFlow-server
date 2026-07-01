@@ -88,18 +88,8 @@ const config: Config = {
   // ────────────────────────────────────────────────────────────────────────
   verbose: true,
 
-  // ────────────────────────────────────────────────────────────────────────
-  // GLOBAL SETUP / TEARDOWN (OPTIONAL)
-  // ────────────────────────────────────────────────────────────────────────
-  // Uncomment if you need to set up/tear down shared resources before/after all tests
-  // globalSetup: './src/common/test/global-setup.ts',
-  // globalTeardown: './src/common/test/global-teardown.ts',
-
-  // ────────────────────────────────────────────────────────────────────────
-  // SETUP FILES (OPTIONAL)
-  // ────────────────────────────────────────────────────────────────────────
-  // Run before each test file (e.g., to load environment variables)
-  // setupFilesAfterEnv: ['./src/common/test/setup.ts'],
+  globalSetup: '<rootDir>/test-setup/global-setup.ts',
+  setupFiles: ['<rootDir>/test-setup/load-test-env.ts'],
 };
 
 export default config;
