@@ -60,6 +60,9 @@ describe('Karigar Integration Tests (e2e)', () => {
       await prisma.karigarPayment.deleteMany({
         where: { karigarId },
       });
+      await prisma.karigarMetalBalance.deleteMany({
+        where: { karigarId },
+      });
       await prisma.karigarDispute.deleteMany({
         where: { karigarId },
       });
@@ -100,7 +103,6 @@ describe('Karigar Integration Tests (e2e)', () => {
             .toString()
             .padStart(7, '0')}`,
           address: 'Test Karigar Address',
-          tolerancePct: 2.5,
         })
         .expect(201);
 
@@ -108,7 +110,6 @@ describe('Karigar Integration Tests (e2e)', () => {
       expect(res.body.data).toMatchObject({
         id: expect.any(String),
         name: expect.any(String),
-        tolerancePct: expect.any(String),
         isActive: true,
       });
 
@@ -349,7 +350,6 @@ describe('Karigar Integration Tests (e2e)', () => {
       expect(res.body.data).toMatchObject({
         id: karigarId,
         name: expect.any(String),
-        tolerancePct: expect.any(String),
         _count: expect.objectContaining({
           productionOrders: expect.any(Number),
           disputes: expect.any(Number),
@@ -399,12 +399,25 @@ describe('Karigar Integration Tests (e2e)', () => {
     });
 
     it('should validate returned weight <= issued weight', async () => {
+      // Create a fresh issue specifically for this weight-validation test,
+      // so the duplicate-return guard does not fire first.
+      const freshIssueRes = await request(app.getHttpServer())
+        .post('/api/v1/production-issues')
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({
+          productionOrderId,
+          metalTypeId: goldMetalTypeId,
+          issuedWeight: { value: 20, unit: 'gram' },
+        });
+
+      const freshIssueId = freshIssueRes.body.data.id;
+
       const res = await request(app.getHttpServer())
         .post('/api/v1/production-returns')
         .set('Authorization', `Bearer ${authToken}`)
         .send({
           productionOrderId,
-          productionIssueId,
+          productionIssueId: freshIssueId,
           returnedWeight: { value: 50, unit: 'gram' }, // More than issued 20g
           items: [
             {
@@ -418,14 +431,14 @@ describe('Karigar Integration Tests (e2e)', () => {
       expect(res.body.success).toBe(false);
     });
 
-    it('should validate tolerance percentage is between 0-100', async () => {
+    it('should validate order tolerance percentage is between 0-100', async () => {
       const res = await request(app.getHttpServer())
-        .post('/api/v1/karigars')
+        .post('/api/v1/production-orders')
         .set('Authorization', `Bearer ${authToken}`)
         .send({
-          name: 'Invalid Karigar',
-          phone: '9841000001',
-          tolerancePct: 150, // Invalid: > 100
+          karigarId,
+          tolerancePct: 150,
+          notes: 'Invalid tolerance',
         })
         .expect(400);
 

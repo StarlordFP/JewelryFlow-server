@@ -4,10 +4,27 @@ import {
   BadRequestException,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { WeightUtil } from '../common/utils/weight.util';
-import { SetDailyRateDto, RateHistoryQueryDto, SetGoldRatesDto } from './dto/rates.dto';
+import {
+  SetDailyRateDto,
+  RateHistoryQueryDto,
+  SetGoldRatesDto,
+  ConfirmRatesDto,
+  PatchRatesSettingsDto,
+} from './dto/rates.dto';
 import { GRAMS_PER_TOLA, GRAMS_PER_LAL } from '../common/constants/weight.constants';
 import { Decimal } from '@prisma/client/runtime/library';
+import { FetchedRateSnapshotStatus } from '@prisma/client';
+import {
+  expireAndCreateDailyRate,
+  deriveShopRateFromPureBase,
+  computeBuyRate,
+  roundRate,
+  PURE_METAL_PURITY_FACTOR,
+} from './rates.helpers';
+import {
+  BUY_DISCOUNT_PCT_KEY,
+  DEFAULT_BUY_DISCOUNT_PCT,
+} from './rates.constants';
 
 @Injectable()
 export class RatesService {
@@ -162,37 +179,17 @@ export class RatesService {
       const results: any[] = [];
 
       for (const metal of goldMetals) {
-        // Expire all current rates for this gold metal type
-        await tx.dailyRate.updateMany({
-          where: { metalTypeId: metal.id, isCurrent: true },
-          data:  { isCurrent: false },
-        });
-
         // Derive rates using purityFactor relative to 24K base
         const purityFactor = new Decimal(metal.purityFactor);
         const sellRatePerGram = sellGram24K.mul(purityFactor).div(purityFactor24k);
         const buyRatePerGram  = buyGram24K.mul(purityFactor).div(purityFactor24k);
 
-        const sellRatePerTola = sellRatePerGram.mul(GRAMS_PER_TOLA);
-        const sellRatePerLal  = sellRatePerGram.mul(GRAMS_PER_LAL);
-        const buyRatePerTola  = buyRatePerGram.mul(GRAMS_PER_TOLA);
-        const buyRatePerLal   = buyRatePerGram.mul(GRAMS_PER_LAL);
-
-        const rate = await tx.dailyRate.create({
-          data: {
-            metalTypeId:     metal.id,
-            sellRatePerGram,
-            sellRatePerTola,
-            sellRatePerLal,
-            buyRatePerGram,
-            buyRatePerTola,
-            buyRatePerLal,
-            isCurrent:       true,
-            updatedByUserId: userId,
-          },
-          include: {
-            metalType: true,
-          },
+        const rate = await expireAndCreateDailyRate(tx, {
+          metalTypeId:     metal.id,
+          sellRatePerGram,
+          buyRatePerGram,
+          userId,
+          include:         { metalType: true },
         });
 
         const formatted = this.formatRate(rate);
@@ -341,9 +338,304 @@ export class RatesService {
   }
 
   async getMetalTypes() {
-  return this.prisma.metalType.findMany({
-    orderBy: { name: 'asc' }
-  })
-}
+    return this.prisma.metalType.findMany({
+      orderBy: { name: 'asc' },
+    });
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  //  SETTINGS (buy discount)
+  // ════════════════════════════════════════════════════════════════════════════
+
+  async getSettings() {
+    const globalPct = await this.getGlobalBuyDiscountPct();
+    const metals = await this.prisma.metalType.findMany({
+      where: { isActive: true },
+      orderBy: { name: 'asc' },
+      select: {
+        id: true,
+        name: true,
+        buyDiscountPctOverride: true,
+      },
+    });
+
+    return {
+      buyDiscountPct: globalPct,
+      metals: metals.map((m) => ({
+        metalTypeId: m.id,
+        name: m.name,
+        buyDiscountPctOverride:
+          m.buyDiscountPctOverride != null
+            ? Number(m.buyDiscountPctOverride)
+            : null,
+      })),
+    };
+  }
+
+  async patchSettings(dto: PatchRatesSettingsDto) {
+    if (dto.buyDiscountPct !== undefined) {
+      await this.prisma.systemSetting.upsert({
+        where: { key: BUY_DISCOUNT_PCT_KEY },
+        create: { key: BUY_DISCOUNT_PCT_KEY, value: String(dto.buyDiscountPct) },
+        update: { value: String(dto.buyDiscountPct) },
+      });
+    }
+
+    if (dto.metalTypeId !== undefined) {
+      const metal = await this.prisma.metalType.findUnique({
+        where: { id: dto.metalTypeId },
+      });
+      if (!metal) {
+        throw new NotFoundException(`MetalType ${dto.metalTypeId} not found`);
+      }
+
+      if (dto.buyDiscountPctOverride === null) {
+        await this.prisma.metalType.update({
+          where: { id: dto.metalTypeId },
+          data: { buyDiscountPctOverride: null },
+        });
+      } else if (dto.buyDiscountPctOverride !== undefined) {
+        await this.prisma.metalType.update({
+          where: { id: dto.metalTypeId },
+          data: { buyDiscountPctOverride: new Decimal(dto.buyDiscountPctOverride) },
+        });
+      }
+    }
+
+    return this.getSettings();
+  }
+
+  async getGlobalBuyDiscountPct(): Promise<number> {
+    const row = await this.prisma.systemSetting.findUnique({
+      where: { key: BUY_DISCOUNT_PCT_KEY },
+    });
+    if (!row) return DEFAULT_BUY_DISCOUNT_PCT;
+    const parsed = parseFloat(row.value);
+    return Number.isNaN(parsed) ? DEFAULT_BUY_DISCOUNT_PCT : parsed;
+  }
+
+  async getEffectiveBuyDiscountPct(metal: {
+    buyDiscountPctOverride: Decimal | null;
+  }): Promise<number> {
+    if (metal.buyDiscountPctOverride != null) {
+      return Number(metal.buyDiscountPctOverride);
+    }
+    return this.getGlobalBuyDiscountPct();
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  //  DERIVE PREVIEW & CONFIRM (fetch-derived flow)
+  // ════════════════════════════════════════════════════════════════════════════
+
+  async derivePreview(fineGoldSellPerGram: number, pureSilverSellPerGram: number) {
+    const metals = await this.prisma.metalType.findMany({
+      where: { isActive: true },
+      orderBy: { name: 'asc' },
+    });
+
+    const goldMetals = metals.filter((m) => m.name.toLowerCase().includes('gold'));
+    const silverMetal = metals.find((m) => m.name.toLowerCase().includes('silver'));
+    const gold24k = goldMetals.find((m) => m.name.toLowerCase().includes('24k'));
+    const gold24kPurity = gold24k
+      ? new Decimal(gold24k.purityFactor)
+      : PURE_METAL_PURITY_FACTOR;
+
+    const fineGoldBase = new Decimal(fineGoldSellPerGram);
+    const pureSilverBase = new Decimal(pureSilverSellPerGram);
+    const globalDiscount = await this.getGlobalBuyDiscountPct();
+
+    const goldRows = await Promise.all(
+      goldMetals.map(async (metal) => {
+        const shopPurity = new Decimal(metal.purityFactor);
+        const derivedSell = deriveShopRateFromPureBase(
+          fineGoldBase,
+          gold24kPurity,
+          shopPurity,
+        );
+        const discount = await this.getEffectiveBuyDiscountPct(metal);
+        const derivedBuy = computeBuyRate(derivedSell, discount);
+
+        return {
+          metalTypeId: metal.id,
+          name: metal.name,
+          metalKind: 'gold' as 'gold' | 'silver',
+          pureBaseLabel: 'Fine gold (24K / 9999)',
+          pureBaseSellPerGram: fineGoldBase.toFixed(2),
+          pureBasePurityFactor: gold24kPurity.toFixed(4),
+          shopPurityFactor: shopPurity.toFixed(4),
+          derivationFormula: `${fineGoldBase.toFixed(2)} × (${shopPurity.toFixed(4)} ÷ ${gold24kPurity.toFixed(4)}) = ${derivedSell.toFixed(2)} NPR/g`,
+          derivedSellRatePerGram: derivedSell.toFixed(2),
+          derivedBuyRatePerGram: derivedBuy.toFixed(2),
+          buyDiscountPct: discount,
+        };
+      }),
+    );
+
+    type PreviewRow = (typeof goldRows)[number];
+    const rows: PreviewRow[] = [...goldRows];
+
+    if (silverMetal) {
+      // FENEGOSIDA publishes 100% pure silver — daily rate matches that figure directly.
+      // MetalType.purityFactor (0.925) applies to item weight/content in stock/sales, not here.
+      const derivedSell = roundRate(pureSilverBase);
+      const discount = await this.getEffectiveBuyDiscountPct(silverMetal);
+      const derivedBuy = computeBuyRate(derivedSell, discount);
+
+      rows.push({
+        metalTypeId: silverMetal.id,
+        name: silverMetal.name,
+        metalKind: 'silver' as const,
+        pureBaseLabel: 'Pure silver (FENEGOSIDA)',
+        pureBaseSellPerGram: pureSilverBase.toFixed(2),
+        pureBasePurityFactor: PURE_METAL_PURITY_FACTOR.toFixed(4),
+        shopPurityFactor: PURE_METAL_PURITY_FACTOR.toFixed(4),
+        derivationFormula: `${pureSilverBase.toFixed(2)} NPR/g (100% pure — stored as published, no purity discount)`,
+        derivedSellRatePerGram: derivedSell.toFixed(2),
+        derivedBuyRatePerGram: derivedBuy.toFixed(2),
+        buyDiscountPct: discount,
+      });
+    }
+
+    return { rows, globalBuyDiscountPct: globalDiscount };
+  }
+
+  async confirmRates(userId: string, dto: ConfirmRatesDto) {
+    const deriveGold = dto.deriveFromGold24k !== false;
+    const metals = await this.prisma.metalType.findMany({
+      where: { isActive: true },
+    });
+
+    const goldMetals = metals.filter((m) => m.name.toLowerCase().includes('gold'));
+    const silverMetal = metals.find((m) => m.name.toLowerCase().includes('silver'));
+    const gold24k = goldMetals.find((m) => m.name.toLowerCase().includes('24k'));
+
+    if (goldMetals.length === 0) {
+      throw new NotFoundException('No active gold metal types found');
+    }
+    if (!silverMetal) {
+      throw new NotFoundException('No active silver metal type found');
+    }
+
+    const gold24kPurity = gold24k
+      ? new Decimal(gold24k.purityFactor)
+      : PURE_METAL_PURITY_FACTOR;
+    const fineGoldBase = new Decimal(dto.fineGoldSellPerGram);
+    const pureSilverBase = new Decimal(dto.pureSilverSellPerGram);
+
+    const overrideMap = new Map(
+      (dto.rows ?? []).map((r) => [r.metalTypeId, r]),
+    );
+
+    type PlannedRow = {
+      metal: (typeof metals)[0];
+      sellRatePerGram: Decimal;
+      buyRatePerGram: Decimal;
+      pureBaseLabel: string;
+    };
+
+    const planned: PlannedRow[] = [];
+
+    if (deriveGold) {
+      for (const metal of goldMetals) {
+        const override = overrideMap.get(metal.id);
+        const shopPurity = new Decimal(metal.purityFactor);
+        const sell =
+          override?.sellRatePerGram != null
+            ? new Decimal(override.sellRatePerGram)
+            : deriveShopRateFromPureBase(fineGoldBase, gold24kPurity, shopPurity);
+        const discount = await this.getEffectiveBuyDiscountPct(metal);
+        const buy =
+          override?.buyRatePerGram != null
+            ? new Decimal(override.buyRatePerGram)
+            : computeBuyRate(sell, discount);
+
+        planned.push({
+          metal,
+          sellRatePerGram: sell,
+          buyRatePerGram: buy,
+          pureBaseLabel: 'Fine gold (24K / 9999)',
+        });
+      }
+    } else {
+      const gold24kMetal = gold24k ?? goldMetals[0];
+      const override = overrideMap.get(gold24kMetal.id);
+      if (!override?.sellRatePerGram || !override?.buyRatePerGram) {
+        throw new BadRequestException(
+          'When deriveFromGold24k is false, provide sell and buy for 24K gold in rows',
+        );
+      }
+      planned.push({
+        metal: gold24kMetal,
+        sellRatePerGram: new Decimal(override.sellRatePerGram),
+        buyRatePerGram: new Decimal(override.buyRatePerGram),
+        pureBaseLabel: 'Fine gold (24K / 9999)',
+      });
+    }
+
+    {
+      const override = overrideMap.get(silverMetal.id);
+      const sell =
+        override?.sellRatePerGram != null
+          ? new Decimal(override.sellRatePerGram)
+          : roundRate(pureSilverBase);
+      const discount = await this.getEffectiveBuyDiscountPct(silverMetal);
+      const buy =
+        override?.buyRatePerGram != null
+          ? new Decimal(override.buyRatePerGram)
+          : computeBuyRate(sell, discount);
+
+      planned.push({
+        metal: silverMetal,
+        sellRatePerGram: sell,
+        buyRatePerGram: buy,
+        pureBaseLabel: 'Pure silver (FENEGOSIDA)',
+      });
+    }
+
+    for (const row of planned) {
+      if (row.buyRatePerGram.gte(row.sellRatePerGram)) {
+        throw new BadRequestException(
+          `Buy rate must be lower than sell rate for ${row.metal.name}`,
+        );
+      }
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const createdIds: string[] = [];
+      const results: ReturnType<RatesService['formatRate']>[] = [];
+
+      for (const row of planned) {
+        const rate = await expireAndCreateDailyRate(tx, {
+          metalTypeId: row.metal.id,
+          sellRatePerGram: row.sellRatePerGram,
+          buyRatePerGram: row.buyRatePerGram,
+          userId,
+          include: {
+            metalType: true,
+            updatedBy: { select: { id: true, name: true } },
+          },
+        });
+        createdIds.push((rate as { id: string }).id);
+        results.push(this.formatRate(rate));
+      }
+
+      if (dto.snapshotId) {
+        await tx.fetchedRateSnapshot.update({
+          where: { id: dto.snapshotId },
+          data: {
+            status: FetchedRateSnapshotStatus.CONFIRMED,
+            consumedAt: new Date(),
+            consumedByDailyRateIds: createdIds,
+          },
+        });
+      }
+
+      return {
+        message: 'Daily rates confirmed successfully',
+        rates: results,
+        snapshotId: dto.snapshotId ?? null,
+      };
+    });
+  }
 
 }

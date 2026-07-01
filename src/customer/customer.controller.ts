@@ -127,6 +127,24 @@ export class CustomerController {
   }
 
   /**
+   * GET /customers/:id/past-sales
+   * SELL transactions with line detail for buyback reference (read-only).
+   */
+  @Get(':id/past-sales')
+  @Roles('OWNER', 'MANAGER', 'STAFF')
+  @ApiOperation({
+    summary: 'Get customer past sales',
+    description:
+      'SELL transactions for a customer, newest first, with line items (description, metal, weight, rate). Read-only.',
+  })
+  @ApiParam({ name: 'id', description: 'Customer ID' })
+  @ApiResponse({ status: 200, description: 'Past sales retrieved' })
+  @ApiResponse({ status: 404, description: 'Customer not found' })
+  pastSales(@Param('id') id: string) {
+    return this.customerService.getPastSales(id);
+  }
+
+  /**
    * GET /customers/:id/transactions
    * Paginated purchase history for a customer.
    */

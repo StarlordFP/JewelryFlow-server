@@ -27,8 +27,21 @@ export interface PricingResult {
   billableWeight: ReturnType<typeof WeightUtil.forBill>; // gross + jerty
   ratePerGram:    string;
 
-  // ── Calculation steps ────────────────────────────────────────────────────
-  metalValueNpr:  string; // billableWeight.gram × ratePerGram
+  // ── Calculation steps (numbers) ──────────────────────────────────────────
+  metalValueNpr:  number; // billableWeight.gram × ratePerGram
+  totalPriceNpr:  number; // metal + jyala + taxes + addons
+  grandTotalNpr:  number; // same as totalPriceNpr for backwards compatibility
+  luxuryTaxNpr:   number; // 2% of metalValue (gold only, if toggled)
+  vatNpr:         number; // 13% of jyala (if toggled)
+  addonValueNpr:  number;
+
+  // ── Calculation steps (strings, for display) ─────────────────────────────
+  metalValueNprStr:  string;
+  totalPriceNprStr:  string;
+  grandTotalNprStr:  string;
+  luxuryTaxNprStr:   string;
+  vatNprStr:         string;
+  addonValueNprStr:  string;
 
   // ── Jyala (owner sees breakdown, customer sees only total) ────────────────
   jyalaOwnerView: {
@@ -40,16 +53,6 @@ export interface PricingResult {
     total:        string;
   };
   jyalaCustomerView: string; // same as jyalaOwnerView.total
-
-  // ── Tax ──────────────────────────────────────────────────────────────────
-  luxuryTaxNpr:  string; // 2% of metalValue (gold only, if toggled)
-  vatNpr:        string; // 13% of jyala (if toggled)
-
-  // ── Addons ────────────────────────────────────────────────────────────────
-  addonValueNpr: string;
-
-  // ── Totals ────────────────────────────────────────────────────────────────
-  grandTotalNpr: string;
 
   // ── Bill views ────────────────────────────────────────────────────────────
   ownerBill:    OwnerBillView;
@@ -107,12 +110,14 @@ export class StockService {
     }
 
     // ── Validate metal type ──────────────────────────────────────────────────
-    if (dto.metalTypeId) {
-      const metal = await this.prisma.metalType.findUnique({
-        where: { id: dto.metalTypeId },
+    const metalTypeId = dto.metalTypeId?.trim() ? dto.metalTypeId.trim() : null;
+    let resolvedMetal = null;
+    if (metalTypeId) {
+      resolvedMetal = await this.prisma.metalType.findUnique({
+        where: { id: metalTypeId },
       });
-      if (!metal || !metal.isActive) {
-        throw new NotFoundException(`MetalType ${dto.metalTypeId} not found or inactive`);
+      if (!resolvedMetal || !resolvedMetal.isActive) {
+        throw new NotFoundException(`MetalType ${metalTypeId} not found or inactive`);
       }
     }
 
@@ -174,6 +179,16 @@ export class StockService {
     // ── Generate SKU ─────────────────────────────────────────────────────────
     const sku = await this.skuService.generateSku(dto.origin.type);
 
+    // Snapshot today's rate so profit report can resolve cost for manual stock entry
+    let entryRateId: string | null = null;
+    if (metalTypeId) {
+      const entryRate = await this.prisma.dailyRate.findFirst({
+        where:   { metalTypeId, isCurrent: true },
+        orderBy: { effectiveDate: 'desc' },
+      });
+      entryRateId = entryRate?.id ?? null;
+    }
+
     // ── Create stock item ────────────────────────────────────────────────────
     const stockItem = await this.prisma.stockItem.create({
       data: {
@@ -181,8 +196,9 @@ export class StockService {
         name:            dto.name,
         origin:          dto.origin.type,
         categoryId:      dto.categoryId,
-        metalTypeId:     dto.metalTypeId,
-        karat:           dto.karat,
+        metalTypeId,
+        karat:           this.isGoldMetal(resolvedMetal) ? dto.karat ?? null : null,
+        entryRateId,
         tradeItemId:     dto.origin.tradeItemId,
         productionItemId: dto.origin.productionItemId,
 
@@ -232,12 +248,58 @@ export class StockService {
       },
     });
 
-    return this.formatStockResponse(stockItem);
+    return await this.formatStockResponse(stockItem);
   }
 
   // ════════════════════════════════════════════════════════════════════════════
   //  READ
   // ════════════════════════════════════════════════════════════════════════════
+
+  /**
+   * List trade items or production items that are not yet linked to stock.
+   * Used by the stock form when origin=TRADE or origin=KARIGAR.
+   */
+  async getOriginLinkOptions(type: 'KARIGAR' | 'TRADE') {
+    if (type === 'TRADE') {
+      const items = await this.prisma.tradeItem.findMany({
+        where:   { stockItem: null },
+        include: {
+          trade: { include: { supplier: { select: { id: true, name: true } } } },
+        },
+        orderBy: { createdAt: 'desc' },
+        take:    100,
+      });
+
+      return items.map((item) => ({
+        id:             item.id,
+        label:          `${item.description} — ${item.trade.supplier.name} (${Number(item.grossWeightGram).toFixed(2)} g)`,
+        tradePartyId:   item.trade.supplier.id,
+        tradePartyName: item.trade.supplier.name,
+        tradeId:        item.tradeId,
+      }));
+    }
+
+    const items = await this.prisma.productionItem.findMany({
+      where:   { stockItem: null },
+      include: {
+        productionReturn: {
+          include: {
+            productionOrder: { include: { karigar: { select: { id: true, name: true } } } },
+          },
+        },
+      },
+      orderBy: { id: 'desc' },
+      take:    100,
+    });
+
+    return items.map((item) => ({
+      id:                item.id,
+      label:             `${item.description} — ${item.productionReturn.productionOrder.karigar.name} (${Number(item.grossWeightGram).toFixed(2)} g)`,
+      karigarId:         item.productionReturn.productionOrder.karigar.id,
+      karigarName:       item.productionReturn.productionOrder.karigar.name,
+      productionOrderId: item.productionReturn.productionOrderId,
+    }));
+  }
 
   async listStockItems(query: StockQueryDto) {
     const {
@@ -285,13 +347,17 @@ export class StockService {
           category:  { select: { id: true, name: true } },
           metalType: { select: { id: true, name: true } },
           addons:    { include: { addonType: true } },
+          entryRate: { select: { id: true, sellRatePerGram: true, effectiveDate: true } },
+          purchaseOrderLine: { select: { rateAtPurchasePerGram: true, purchaseOrderId: true } },
         },
       }),
       this.prisma.stockItem.count({ where }),
     ]);
 
+    const formattedItems = await Promise.all(items.map((i) => this.formatStockResponse(i)));
+
     return {
-      data: items.map((i) => this.formatStockResponse(i)),
+      data: formattedItems,
       meta: { total, page, limit, pages: Math.ceil(total / limit) },
     };
   }
@@ -303,12 +369,30 @@ export class StockService {
         category:  true,
         metalType: true,
         addons:    { include: { addonType: true } },
+        entryRate: { select: { id: true, sellRatePerGram: true, effectiveDate: true } },
+        purchaseOrderLine: { select: { rateAtPurchasePerGram: true, purchaseOrderId: true } },
         tradeItem: { include: { trade: { include: { supplier: true } } } },
+        // Remake traceability: which production issue consumed this item as input
+        productionIssueSourceItems: {
+          include: {
+            productionIssue: {
+              include: {
+                productionOrder: {
+                  include: { karigar: { select: { id: true, name: true } } },
+                },
+              },
+            },
+          },
+        },
+        // If remade: which new stock item it was turned into (best-effort pointer)
+        remadeIntoStockItem: {
+          select: { id: true, sku: true, name: true },
+        },
       },
     });
 
     if (!item) throw new NotFoundException(`StockItem ${id} not found`);
-    return this.formatStockResponse(item);
+    return await this.formatStockResponse(item);
   }
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -331,12 +415,63 @@ export class StockService {
 
     const data: any = {};
 
+    // ── Update gross weight ──────────────────────────────────────────────────
+    if (dto.grossWeight) {
+      const grossW            = WeightUtil.from(dto.grossWeight.value, dto.grossWeight.unit);
+      data.grossWeightGram    = grossW.gram;
+      data.grossWeightTola    = grossW.tola;
+      data.grossWeightLal     = grossW.lal;
+    }
+
     // ── Update jerty ─────────────────────────────────────────────────────────
     if (dto.jertyWeight) {
       const jertyW        = WeightUtil.from(dto.jertyWeight.value, dto.jertyWeight.unit);
       data.jertyGram      = jertyW.gram;
       data.jertyTola      = jertyW.tola;
       data.jertyLal       = jertyW.lal;
+    }
+
+    // ── Update category ──────────────────────────────────────────────────────
+    if (dto.categoryId !== undefined) {
+      const category = await this.prisma.itemCategory.findUnique({
+        where: { id: dto.categoryId },
+      });
+      if (!category || !category.isActive) {
+        throw new NotFoundException(`Category ${dto.categoryId} not found or inactive`);
+      }
+      data.categoryId = dto.categoryId;
+    }
+
+    // ── Update metal type ────────────────────────────────────────────────────
+    if (dto.metalTypeId !== undefined) {
+      const metalTypeId = dto.metalTypeId?.trim() ? dto.metalTypeId.trim() : null;
+      if (metalTypeId) {
+        const metal = await this.prisma.metalType.findUnique({
+          where: { id: metalTypeId },
+        });
+        if (!metal || !metal.isActive) {
+          throw new NotFoundException(`MetalType ${metalTypeId} not found or inactive`);
+        }
+        data.metalTypeId = metalTypeId;
+      } else {
+        data.metalTypeId = null;
+      }
+    }
+
+    if (dto.karat !== undefined) data.karat = dto.karat;
+
+    // Non-gold metals (e.g. Silver) never carry a karat value
+    const effectiveMetalId =
+      data.metalTypeId !== undefined ? data.metalTypeId : existing.metalTypeId;
+    if (effectiveMetalId) {
+      const metal = await this.prisma.metalType.findUnique({
+        where: { id: effectiveMetalId },
+      });
+      if (!this.isGoldMetal(metal)) {
+        data.karat = null;
+      }
+    } else if (data.metalTypeId === null) {
+      data.karat = null;
     }
 
     // ── Update jyala breakdown ────────────────────────────────────────────────
@@ -366,7 +501,7 @@ export class StockService {
       },
     });
 
-    return this.formatStockResponse(updated);
+    return await this.formatStockResponse(updated);
   }
 
   async updateStockStatus(id: string, dto: UpdateStockStatusDto) {
@@ -385,7 +520,7 @@ export class StockService {
       },
     });
 
-    return this.formatStockResponse(updated);
+    return await this.formatStockResponse(updated);
   }
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -491,126 +626,163 @@ export class StockService {
    * when creating a bill.
    */
   async calculatePrice(
-  item: any,
-  dailyRate: any,
-  overrides?: Partial<PricePreviewDto>,
-  tx?: any,                              // accepts prisma tx client for use inside transactions
-): Promise<PricingResult> {
-  const client     = tx ?? this.prisma;
-  const ratePerGram = Number(dailyRate.ratePerGram ?? dailyRate.sellRatePerGram);
+    item: any,
+    dailyRate: any,
+    overrides?: Partial<PricePreviewDto>,
+    tx?: any,                              // accepts prisma tx client for use inside transactions
+  ): Promise<PricingResult> {
+    const client = tx ?? this.prisma;
+    const ratePerGram = new Decimal(dailyRate.ratePerGram ?? dailyRate.sellRatePerGram);
 
-  // ── Weights ─────────────────────────────────────────────────────────────
-  const grossGram = Number(item.grossWeightGram);
+    // ── Weights ─────────────────────────────────────────────────────────────
+    const grossGram = new Decimal(item.grossWeightGram ?? 0);
 
-  const jertyGram = (overrides?.jertyOverride != null)
-    ? WeightUtil.from(overrides.jertyOverride.value, overrides.jertyOverride.unit).gram
-    : Number(item.jertyGram ?? 0);
+    const resolvedJertyGram = (overrides?.jertyOverride != null)
+      ? WeightUtil.from(overrides.jertyOverride.value, overrides.jertyOverride.unit).gram
+      : Number(item.jertyGram ?? 0);
+    const jertyGram = new Decimal(resolvedJertyGram);
 
-  const billableGram = grossGram + jertyGram;
+    const billableGram = grossGram.plus(jertyGram);
 
-  // ── Metal value ──────────────────────────────────────────────────────────
-  const metalValueNpr = billableGram * ratePerGram;
+    // ── Metal value ──────────────────────────────────────────────────────────
+    const metalValueNpr = billableGram.mul(ratePerGram);
 
-  // ── Jyala ────────────────────────────────────────────────────────────────
-  // Treat both null and undefined as "no override" — callers may pass
-  // { jyalaOverride: undefined } or { jyalaOverride: null } interchangeably
-  const finalJyala = (overrides?.jyalaOverride != null)
-    ? overrides.jyalaOverride
-    : Number(item.totalJyalaNpr ?? 0);
+    // ── Jyala ────────────────────────────────────────────────────────────────
+    let finalJyala: Decimal;
+    let jyalaBreakdown = {
+      makingCharge: Number(item.makingChargeNpr ?? 0),
+      stoneCharge: Number(item.stoneChargeNpr ?? 0),
+      motiCharge: Number(item.motiChargeNpr ?? 0),
+      malaCharge: Number(item.malaChargeNpr ?? 0),
+      otherCharge: Number(item.otherChargeNpr ?? 0),
+    };
 
-  // ── Luxury tax — read active rule from DB, not hardcoded ─────────────────
-  // item.applyLuxuryTax is the per-item toggle (checkbox on frontend)
-  // LuxuryTaxRule.isActive is the shop-wide master switch (owner can disable globally)
-  // Both must be true for tax to apply
-  let luxuryTaxNpr = 0;
-  if (item.applyLuxuryTax) {
-    const isGold = item.metalType?.name?.toLowerCase().includes('gold') ?? false;
-    if (isGold) {
-      const luxuryRule = await client.luxuryTaxRule.findFirst({
-        where:   { isActive: true, appliesTo: 'GOLD' },
-        orderBy: { effectiveDate: 'desc' },   // most recent active rule wins
-      });
-      if (luxuryRule) {
-        luxuryTaxNpr = metalValueNpr * Number(luxuryRule.rate);
+    if (overrides?.jyalaBreakdown) {
+      // Use jyalaBreakdown override
+      jyalaBreakdown = {
+        makingCharge: overrides.jyalaBreakdown.makingChargeNpr ?? jyalaBreakdown.makingCharge,
+        stoneCharge: overrides.jyalaBreakdown.stoneChargeNpr ?? jyalaBreakdown.stoneCharge,
+        motiCharge: overrides.jyalaBreakdown.motiChargeNpr ?? jyalaBreakdown.motiCharge,
+        malaCharge: overrides.jyalaBreakdown.malaChargeNpr ?? jyalaBreakdown.malaCharge,
+        otherCharge: overrides.jyalaBreakdown.otherChargeNpr ?? jyalaBreakdown.otherCharge,
+      };
+      finalJyala = new Decimal(
+        jyalaBreakdown.makingCharge +
+        jyalaBreakdown.stoneCharge +
+        jyalaBreakdown.motiCharge +
+        jyalaBreakdown.malaCharge +
+        jyalaBreakdown.otherCharge
+      );
+    } else if (overrides?.jyalaOverride != null) {
+      // Use jyalaOverride if provided
+      finalJyala = new Decimal(overrides.jyalaOverride);
+    } else {
+      // Use stored values
+      finalJyala = new Decimal(Number(item.totalJyalaNpr ?? 0));
+    }
+
+    // ── Tax overrides ────────────────────────────────────────────────────────
+    const resolvedApplyLuxuryTax = overrides?.applyLuxuryTax ?? item.applyLuxuryTax;
+    const resolvedApplyVat = overrides?.applyVat ?? item.applyVat;
+
+    // ── Luxury tax — read active rule from DB, not hardcoded ─────────────────
+    let luxuryTaxNpr = new Decimal(0);
+    if (resolvedApplyLuxuryTax) {
+      const isGold = item.metalType?.name?.toLowerCase().includes('gold') ?? false;
+      if (isGold) {
+        const luxuryRule = await client.luxuryTaxRule.findFirst({
+          where:   { isActive: true, appliesTo: 'GOLD' },
+          orderBy: { effectiveDate: 'desc' },   // most recent active rule wins
+        });
+        if (luxuryRule) {
+          luxuryTaxNpr = metalValueNpr.mul(new Decimal(luxuryRule.rate));
+        }
       }
-      // If no active rule exists → tax is 0, no error
-      // This handles the case where government removes the tax —
-      // owner deactivates the rule, all new bills automatically get 0 luxury tax
     }
-  }
 
-  // ── VAT — read active rule from DB ───────────────────────────────────────
-  let vatNpr = 0;
-  if (item.applyVat) {
-    const vatRule = await client.vatRule.findFirst({
-      where:   { isActive: true, appliesTo: 'JYALA' },
-      orderBy: { effectiveDate: 'desc' },
-    });
-    if (vatRule) {
-      vatNpr = finalJyala * Number(vatRule.rate);
+    // ── VAT — read active rule from DB ───────────────────────────────────────
+    let vatNpr = new Decimal(0);
+    if (resolvedApplyVat) {
+      const vatRule = await client.vatRule.findFirst({
+        where:   { isActive: true, appliesTo: 'JYALA' },
+        orderBy: { effectiveDate: 'desc' },
+      });
+      if (vatRule) {
+        vatNpr = finalJyala.mul(new Decimal(vatRule.rate));
+      }
     }
-  }
 
-  // ── Addons ───────────────────────────────────────────────────────────────
-  const addonValueNpr = item.addons?.reduce(
-    (sum: number, a: any) => sum + Number(a.valuationNpr ?? 0),
-    0,
-  ) ?? 0;
+    // ── Addons ───────────────────────────────────────────────────────────────
+    const resolvedAddonValue = item.addons?.reduce(
+      (sum: number, a: any) => sum + Number(a.valuationNpr ?? 0),
+      0,
+    ) ?? 0;
+    const addonValueNpr = new Decimal(resolvedAddonValue);
 
-  // ── Grand total ──────────────────────────────────────────────────────────
-  const grandTotalNpr = metalValueNpr + finalJyala + luxuryTaxNpr + vatNpr + addonValueNpr;
+    // ── Grand total ──────────────────────────────────────────────────────────
+    const grandTotalNprDecimal = metalValueNpr.plus(finalJyala).plus(luxuryTaxNpr).plus(vatNpr).plus(addonValueNpr);
 
-  const fmt = (n: number) => (n ?? 0).toFixed(2);
+    const fmt = (d: Decimal) => d.toFixed(2);
 
-  const result: PricingResult = {
-    grossWeight:    WeightUtil.forBill(grossGram),
-    jertyWeight:    WeightUtil.forBill(jertyGram),
-    billableWeight: WeightUtil.forBill(billableGram),
-    ratePerGram:    fmt(ratePerGram),
-    metalValueNpr:  fmt(metalValueNpr),
+    const result: PricingResult = {
+      grossWeight:    WeightUtil.forBill(grossGram.toNumber()),
+      jertyWeight:    WeightUtil.forBill(jertyGram.toNumber()),
+      billableWeight: WeightUtil.forBill(billableGram.toNumber()),
+      ratePerGram:    fmt(ratePerGram),
 
-    jyalaOwnerView: {
-      makingCharge: fmt(Number(item.makingChargeNpr ?? 0)),
-      stoneCharge:  fmt(Number(item.stoneChargeNpr  ?? 0)),
-      motiCharge:   fmt(Number(item.motiChargeNpr   ?? 0)),
-      malaCharge:   fmt(Number(item.malaChargeNpr   ?? 0)),
-      otherCharge:  fmt(Number(item.otherChargeNpr  ?? 0)),
-      total:        fmt(finalJyala),
-    },
-    jyalaCustomerView: fmt(finalJyala),
+      // Number fields
+      metalValueNpr:  metalValueNpr.toNumber(),
+      totalPriceNpr:  grandTotalNprDecimal.toNumber(),
+      grandTotalNpr:  grandTotalNprDecimal.toNumber(),
+      luxuryTaxNpr:   luxuryTaxNpr.toNumber(),
+      vatNpr:         vatNpr.toNumber(),
+      addonValueNpr:  addonValueNpr.toNumber(),
 
-    luxuryTaxNpr:  fmt(luxuryTaxNpr),
-    vatNpr:        fmt(vatNpr),
-    addonValueNpr: fmt(addonValueNpr),
-    grandTotalNpr: fmt(grandTotalNpr),
+      // String fields for display
+      metalValueNprStr:  fmt(metalValueNpr),
+      totalPriceNprStr:  fmt(grandTotalNprDecimal),
+      grandTotalNprStr:  fmt(grandTotalNprDecimal),
+      luxuryTaxNprStr:   fmt(luxuryTaxNpr),
+      vatNprStr:         fmt(vatNpr),
+      addonValueNprStr:  fmt(addonValueNpr),
 
-    ownerBill: {
-      metalValue: fmt(metalValueNpr),
-      jyalaBreakdown: {
-        makingCharge: fmt(Number(item.makingChargeNpr ?? 0)),
-        stoneCharge:  fmt(Number(item.stoneChargeNpr  ?? 0)),
-        motiCharge:   fmt(Number(item.motiChargeNpr   ?? 0)),
-        malaCharge:   fmt(Number(item.malaChargeNpr   ?? 0)),
-        otherCharge:  fmt(Number(item.otherChargeNpr  ?? 0)),
+      jyalaOwnerView: {
+        makingCharge: new Decimal(jyalaBreakdown.makingCharge).toFixed(2),
+        stoneCharge:  new Decimal(jyalaBreakdown.stoneCharge).toFixed(2),
+        motiCharge:   new Decimal(jyalaBreakdown.motiCharge).toFixed(2),
+        malaCharge:   new Decimal(jyalaBreakdown.malaCharge).toFixed(2),
+        otherCharge:  new Decimal(jyalaBreakdown.otherCharge).toFixed(2),
+        total:        fmt(finalJyala),
       },
-      jyalaTotal:  fmt(finalJyala),
-      luxuryTax:   luxuryTaxNpr > 0 ? fmt(luxuryTaxNpr) : null,
-      vat:         vatNpr > 0       ? fmt(vatNpr)        : null,
-      addonValue:  fmt(addonValueNpr),
-      grandTotal:  fmt(grandTotalNpr),
-    },
+      jyalaCustomerView: fmt(finalJyala),
 
-    customerBill: {
-      metalValue: fmt(metalValueNpr),
-      jyala:      fmt(finalJyala),
-      luxuryTax:  luxuryTaxNpr > 0 ? fmt(luxuryTaxNpr) : null,
-      vat:        vatNpr > 0       ? fmt(vatNpr)        : null,
-      grandTotal: fmt(grandTotalNpr),
-    },
-  };
+      ownerBill: {
+        metalValue: fmt(metalValueNpr),
+        jyalaBreakdown: {
+          makingCharge: new Decimal(jyalaBreakdown.makingCharge).toFixed(2),
+          stoneCharge:  new Decimal(jyalaBreakdown.stoneCharge).toFixed(2),
+          motiCharge:   new Decimal(jyalaBreakdown.motiCharge).toFixed(2),
+          malaCharge:   new Decimal(jyalaBreakdown.malaCharge).toFixed(2),
+          otherCharge:  new Decimal(jyalaBreakdown.otherCharge).toFixed(2),
+        },
+        jyalaTotal:  fmt(finalJyala),
+        luxuryTax:   luxuryTaxNpr.greaterThan(0) ? fmt(luxuryTaxNpr) : null,
+        vat:         vatNpr.greaterThan(0)       ? fmt(vatNpr)        : null,
+        addonValue:  fmt(addonValueNpr),
+        grandTotal:  fmt(grandTotalNprDecimal),
+      },
 
-  return result;
-}
+      customerBill: {
+        metalValue: fmt(metalValueNpr),
+        jyala:      fmt(finalJyala),
+        luxuryTax:  luxuryTaxNpr.greaterThan(0) ? fmt(luxuryTaxNpr) : null,
+        vat:         vatNpr.greaterThan(0)       ? fmt(vatNpr)        : null,
+        grandTotal: fmt(grandTotalNprDecimal),
+      },
+    };
+
+    return result;
+  }
 
   // ════════════════════════════════════════════════════════════════════════════
   //  SUGGESTED JERTY & JYALA (for frontend hints)
@@ -656,6 +828,10 @@ export class StockService {
   //  HELPERS
   // ════════════════════════════════════════════════════════════════════════════
 
+  private isGoldMetal(metal: { name: string } | null | undefined): boolean {
+    return metal?.name?.toLowerCase().includes('gold') ?? false;
+  }
+
   /** Sum jyala breakdown fields, return individual values + total */
   private sumJyala(breakdown?: JyalaBreakdownDto) {
     const making = breakdown?.makingChargeNpr ?? 0;
@@ -668,8 +844,103 @@ export class StockService {
     return { making, stone, moti, mala, other, total };
   }
 
+  /** Same cost-rate logic as the profit report — for API responses and audits. */
+  private resolveCostRateInfo(item: {
+    id: string;
+    origin: string;
+    entryRateId?: string | null;
+    entryRate?: { id: string; sellRatePerGram: unknown; effectiveDate?: Date } | null;
+    purchaseOrderLine?: { rateAtPurchasePerGram: unknown; purchaseOrderId?: string } | null;
+  }) {
+    const purchaseRate = item.purchaseOrderLine?.rateAtPurchasePerGram;
+    const entryRateGram = item.entryRate?.sellRatePerGram;
+
+    if (item.origin === 'PURCHASED' && purchaseRate != null) {
+      return {
+        hasKnownCost:      true,
+        costRatePerGram:   Number(purchaseRate).toFixed(2),
+        costRateSource:    'PURCHASE_RATE' as const,
+        purchaseRatePerGram: Number(purchaseRate).toFixed(2),
+        entryRatePerGram:  entryRateGram != null ? Number(entryRateGram).toFixed(2) : null,
+        entryRateId:       item.entryRateId ?? item.entryRate?.id ?? null,
+        purchaseOrderId:   item.purchaseOrderLine?.purchaseOrderId ?? null,
+      };
+    }
+
+    if (entryRateGram != null) {
+      return {
+        hasKnownCost:      true,
+        costRatePerGram:   Number(entryRateGram).toFixed(2),
+        costRateSource:    'ENTRY_RATE' as const,
+        purchaseRatePerGram: purchaseRate != null ? Number(purchaseRate).toFixed(2) : null,
+        entryRatePerGram:  Number(entryRateGram).toFixed(2),
+        entryRateId:       item.entryRateId ?? item.entryRate?.id ?? null,
+        purchaseOrderId:   item.purchaseOrderLine?.purchaseOrderId ?? null,
+      };
+    }
+
+    return {
+      hasKnownCost:      false,
+      costRatePerGram:   null,
+      costRateSource:    'UNKNOWN' as const,
+      purchaseRatePerGram: purchaseRate != null ? Number(purchaseRate).toFixed(2) : null,
+      entryRatePerGram:  null,
+      entryRateId:       item.entryRateId ?? null,
+      purchaseOrderId:   item.purchaseOrderLine?.purchaseOrderId ?? null,
+    };
+  }
+
+  /**
+   * Audit all stock items — shows whether each has a purchase/entry cost rate
+   * (used by profit report). Callable from GET /stock/cost-audit or browser console.
+   */
+  async getCostRateAudit(query?: { status?: string }) {
+    const where: Record<string, unknown> = {};
+    if (query?.status) where.status = query.status;
+
+    const items = await this.prisma.stockItem.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      include: {
+        metalType: { select: { id: true, name: true } },
+        entryRate: { select: { id: true, sellRatePerGram: true, effectiveDate: true } },
+        purchaseOrderLine: { select: { rateAtPurchasePerGram: true, purchaseOrderId: true } },
+      },
+    });
+
+    const rows = items.map((item) => {
+      const cost = this.resolveCostRateInfo(item);
+      return {
+        id:                item.id,
+        sku:               item.sku,
+        name:              item.name,
+        status:            item.status,
+        origin:            item.origin,
+        metalType:         item.metalType?.name ?? null,
+        ...cost,
+      };
+    });
+
+    const withCost    = rows.filter((r) => r.hasKnownCost).length;
+    const withoutCost = rows.filter((r) => !r.hasKnownCost).length;
+
+    return {
+      summary: {
+        total:            rows.length,
+        withKnownCost:    withCost,
+        withoutKnownCost: withoutCost,
+        bySource: {
+          PURCHASE_RATE: rows.filter((r) => r.costRateSource === 'PURCHASE_RATE').length,
+          ENTRY_RATE:    rows.filter((r) => r.costRateSource === 'ENTRY_RATE').length,
+          UNKNOWN:       rows.filter((r) => r.costRateSource === 'UNKNOWN').length,
+        },
+      },
+      data: rows,
+    };
+  }
+
   /** Format a raw stock item for API response — adds bill-ready weight display */
-  private formatStockResponse(item: any) {
+  private async formatStockResponse(item: any) {
     if (!item) return item;
 
     // Convert Prisma Decimal fields to plain numbers for JSON serialization
@@ -686,6 +957,61 @@ export class StockService {
     const otherChargeNpr  = Number(item.otherChargeNpr);
     const totalJyalaNpr   = Number(item.totalJyalaNpr);
 
+    // Calculate all price fields
+    let metalValueNpr = 0;
+    let luxuryTaxNpr = 0;
+    let vatNpr = 0;
+    let totalPriceNpr = 0;
+    let grandTotalNpr = 0;
+
+    if (item.metalTypeId) {
+      const dailyRate = await this.prisma.dailyRate.findFirst({
+        where: { metalTypeId: item.metalTypeId, isCurrent: true },
+        orderBy: { effectiveDate: 'desc' },
+      });
+
+      if (dailyRate) {
+        const billableGram = grossWeightGram + jertyGram;
+        const ratePerGram = Number(dailyRate.sellRatePerGram);
+
+        metalValueNpr = billableGram * ratePerGram;
+
+        // Calculate luxury tax
+        if (item.applyLuxuryTax) {
+          const isGold = item.metalType?.name?.toLowerCase().includes('gold') ?? false;
+          if (isGold) {
+            const luxuryRule = await this.prisma.luxuryTaxRule.findFirst({
+              where: { isActive: true, appliesTo: 'GOLD' },
+              orderBy: { effectiveDate: 'desc' },
+            });
+            if (luxuryRule) {
+              luxuryTaxNpr = metalValueNpr * Number(luxuryRule.rate);
+            }
+          }
+        }
+
+        // Calculate VAT
+        if (item.applyVat) {
+          const vatRule = await this.prisma.vatRule.findFirst({
+            where: { isActive: true, appliesTo: 'JYALA' },
+            orderBy: { effectiveDate: 'desc' },
+          });
+          if (vatRule) {
+            vatNpr = totalJyalaNpr * Number(vatRule.rate);
+          }
+        }
+
+        // Calculate addon value
+        const addonValueNpr = item.addons?.reduce(
+          (sum: number, a: any) => sum + Number(a.valuationNpr ?? 0),
+          0,
+        ) ?? 0;
+
+        totalPriceNpr = metalValueNpr + totalJyalaNpr + luxuryTaxNpr + vatNpr + addonValueNpr;
+        grandTotalNpr = totalPriceNpr; // backwards compatibility
+      }
+    }
+
     return {
       ...item,
       // Override Decimal → Number
@@ -701,6 +1027,12 @@ export class StockService {
       malaChargeNpr,
       otherChargeNpr,
       totalJyalaNpr,
+      // New price fields
+      metalValueNpr,
+      totalPriceNpr,
+      grandTotalNpr,
+      luxuryTaxNpr,
+      vatNpr,
       // Computed weight views
       grossWeight: WeightUtil.forBill(grossWeightGram),
       jertyWeight: WeightUtil.forBill(jertyGram),
@@ -716,6 +1048,8 @@ export class StockService {
       },
       // Customer only sees total jyala
       jyalaCustomerView: totalJyalaNpr.toFixed(2),
+      // Cost rate snapshot — for profit report debugging
+      costRate: this.resolveCostRateInfo(item),
     };
   }
 

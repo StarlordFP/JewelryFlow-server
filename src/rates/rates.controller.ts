@@ -2,6 +2,7 @@ import {
   Controller,
   Get,
   Post,
+  Patch,
   Body,
   Param,
   Query,
@@ -11,8 +12,15 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiBearerAuth } from '@nestjs/swagger';
 import { RatesService } from './rates.service';
-import { SetDailyRateDto, RateHistoryQueryDto, SetGoldRatesDto } from './dto/rates.dto';
-// import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
+import { RatesFetchService } from './rates-fetch.service';
+import {
+  SetDailyRateDto,
+  RateHistoryQueryDto,
+  SetGoldRatesDto,
+  DerivePreviewQueryDto,
+  ConfirmRatesDto,
+  PatchRatesSettingsDto,
+} from './dto/rates.dto';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 import { CurrentUser } from '../common/decorators/roles.decorator';
@@ -22,7 +30,10 @@ import { CurrentUser } from '../common/decorators/roles.decorator';
 @UseGuards(RolesGuard)
 @Controller('rates')
 export class RatesController {
-  constructor(private readonly ratesService: RatesService) {}
+  constructor(
+    private readonly ratesService: RatesService,
+    private readonly fetchService: RatesFetchService,
+  ) {}
 
   /**
    * POST /rates/gold
@@ -53,6 +64,72 @@ export class RatesController {
     return this.ratesService.setRate(userId, dto);
   }
 
+  /**
+   * POST /rates/confirm
+   * Confirm fetch-derived rates (gold karats + silver) with optional per-row overrides.
+   */
+  @Post('confirm')
+  @Roles('OWNER', 'MANAGER')
+  confirmRates(
+    @CurrentUser('id') userId: string,
+    @Body() dto: ConfirmRatesDto,
+  ) {
+    return this.ratesService.confirmRates(userId, dto);
+  }
+
+  /**
+   * GET /rates/derive-preview
+   * Preview derived shop rates from fine gold + pure silver base rates.
+   */
+  @Get('derive-preview')
+  @Roles('OWNER', 'MANAGER')
+  derivePreview(@Query() query: DerivePreviewQueryDto) {
+    return this.ratesService.derivePreview(
+      query.fineGoldSellPerGram,
+      query.pureSilverSellPerGram,
+    );
+  }
+
+  /**
+   * GET /rates/fetch/latest
+   * Latest fetched rate snapshot (any status).
+   */
+  @Get('fetch/latest')
+  @Roles('OWNER', 'MANAGER')
+  getLatestFetch() {
+    return this.fetchService.getLatestSnapshot();
+  }
+
+  /**
+   * POST /rates/fetch/run
+   * Manually trigger a fetch from FENEGOSIDA.
+   */
+  @Post('fetch/run')
+  @HttpCode(HttpStatus.OK)
+  @Roles('OWNER', 'MANAGER')
+  runFetch() {
+    return this.fetchService.runFetch(true);
+  }
+
+  /**
+   * GET /rates/settings
+   * Global buy discount and per-metal overrides.
+   */
+  @Get('settings')
+  @Roles('OWNER', 'MANAGER')
+  getSettings() {
+    return this.ratesService.getSettings();
+  }
+
+  /**
+   * PATCH /rates/settings
+   * Update global buy discount or per-metal override.
+   */
+  @Patch('settings')
+  @Roles('OWNER', 'MANAGER')
+  patchSettings(@Body() dto: PatchRatesSettingsDto) {
+    return this.ratesService.patchSettings(dto);
+  }
 
   /**
    * GET /rates/today
@@ -89,7 +166,6 @@ export class RatesController {
   @Get('metal-types')
   @Roles('OWNER', 'MANAGER', 'STAFF')
   getMetalTypes() {
-  return this.ratesService.getMetalTypes()
-}
-
+    return this.ratesService.getMetalTypes();
+  }
 }

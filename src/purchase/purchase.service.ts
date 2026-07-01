@@ -124,6 +124,7 @@ export class PurchaseService {
 
       return {
         description:     line.description,
+        itemName:        line.itemName,
         categoryId:      line.categoryId,
         metalTypeId:     line.metalTypeId,
         karat:           line.karat,
@@ -223,6 +224,7 @@ export class PurchaseService {
         const stockItem = await tx.stockItem.create({
           data: {
             sku,
+            name:            line.itemName || line.description,
             origin:          'PURCHASED',
             categoryId:      line.categoryId ?? await this.getDefaultCategoryId(tx),
             metalTypeId:     line.metalTypeId,

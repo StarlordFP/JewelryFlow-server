@@ -9,7 +9,7 @@ import {
   ApiResponse,
 } from '@nestjs/swagger';
 import { LedgerService } from './ledger.service';
-import { GoldLedgerQueryDto } from './dto/ledger.dto';
+import { GoldLedgerQueryDto, ProfitReportQueryDto } from './dto/ledger.dto';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 
@@ -43,6 +43,28 @@ export class LedgerController {
   })
   getGoldLedger(@Query() query: GoldLedgerQueryDto) {
     return this.ledgerService.getGoldLedger(query);
+  }
+
+  /**
+   * GET /ledger/profit
+   * Per-sold-line comparison of purchase/entry rate (cost) vs sold rate, with
+   * the resulting metal-level profit, plus a summary.
+   *
+   * Roles: OWNER, MANAGER
+   */
+  @Get('profit')
+  @Roles('OWNER', 'MANAGER')
+  @ApiOperation({
+    summary: 'Get profit / rate-comparison report',
+    description:
+      'For every sold item line, returns the rate it was acquired at (cost) — ' +
+      'from the purchase rate or the stock-entry rate — alongside the rate it was ' +
+      'sold at, and the resulting metal-level profit. Includes a summary of total ' +
+      'revenue, cost and profit. Profit totals only include lines with a known cost rate.',
+  })
+  @ApiResponse({ status: 200, description: 'Profit report retrieved successfully' })
+  getProfitReport(@Query() query: ProfitReportQueryDto) {
+    return this.ledgerService.getProfitReport(query);
   }
 
   /**

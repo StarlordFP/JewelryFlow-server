@@ -8,8 +8,9 @@ import { PrismaService } from '../prisma/prisma.service';
 import { StockService } from '../stock/stock.service';
 import { BillNumberService } from './bill-number.service';
 import { WeightUtil } from '../common/utils/weight.util';
+import { GRAMS_PER_TOLA } from '../common/constants/weight.constants';
 import { Decimal } from '@prisma/client/runtime/library';
-import { randomBytes } from 'crypto';
+import { randomBytes, createHash } from 'crypto';
 import {
   CreateSellDto,
   CreateReturnDto,
@@ -46,9 +47,57 @@ export class SalesService {
    * 6. Record payment, calculate balance
    */
   async createSell(userId: string, dto: CreateSellDto) {
-    const { customerId, items, payment, notes } = dto;
+    const {
+      customerId,
+      newCustomerName,
+      newCustomerPhone,
+      newCustomerAddress,
+      items,
+      payment,
+      notes,
+    } = dto;
 
     return this.prisma.$transaction(async (tx) => {
+      let resolvedCustomerId = customerId;
+
+      if (!resolvedCustomerId && newCustomerName) {
+        let phoneHash = undefined;
+        let phoneHint = undefined;
+
+        if (newCustomerPhone) {
+          const normalised = newCustomerPhone.replace(/[\s\-()]/g, '');
+          phoneHash = createHash('sha256').update(normalised).digest('hex');
+          const digits = normalised.replace(/\D/g, '');
+          phoneHint = `****${digits.slice(-4)}`;
+
+          const existingCustomer = await tx.customer.findUnique({
+            where: { phoneHash },
+          });
+
+          if (existingCustomer) {
+            resolvedCustomerId = existingCustomer.id;
+          } else {
+            const customer = await tx.customer.create({
+              data: {
+                name: newCustomerName,
+                phoneHash,
+                phoneHint,
+                address: newCustomerAddress,
+              },
+            });
+            resolvedCustomerId = customer.id;
+          }
+        } else {
+          const customer = await tx.customer.create({
+            data: {
+              name: newCustomerName,
+              address: newCustomerAddress,
+            },
+          });
+          resolvedCustomerId = customer.id;
+        }
+      }
+
       const billNum = await this.billNumber.generate(tx);
       let subTotal = new Decimal(0);
       const lineData: any[] = [];
@@ -57,7 +106,19 @@ export class SalesService {
       const stockItemIds = items.map(i => i.stockItemId);
       const stockItems = await tx.stockItem.findMany({
         where: { id: { in: stockItemIds } },
-        include: { metalType: true, addons: true },
+        include: {
+          metalType: true,
+          addons:    true,
+          productionItem: {
+            include: {
+              productionReturn: {
+                include: {
+                  productionIssue: true,
+                },
+              },
+            },
+          },
+        },
       });
 
       // Validate all items were found
@@ -65,6 +126,15 @@ export class SalesService {
       const missing = stockItemIds.filter(id => !foundIds.includes(id));
       if (missing.length) {
         throw new NotFoundException(`StockItems not found: ${missing.join(', ')}`);
+      }
+
+      // ── Explicit UNDER_DISPUTE guard ─────────────────────────────────────
+      const underDispute = stockItems.filter(s => s.status === 'UNDER_DISPUTE');
+      if (underDispute.length > 0) {
+        throw new ConflictException(
+          `Items under dispute cannot be sold: ${underDispute.map(s => s.sku).join(', ')}. ` +
+          `Resolve the karigar dispute first (PATCH /karigar-disputes/:id/resolve).`,
+        );
       }
 
       // ── Atomic conditional update to mark items as SOLD ──────────────────
@@ -93,9 +163,13 @@ export class SalesService {
       // Map metalTypeId → rate for O(1) lookup
       const rateMap = new Map(rates.map(r => [r.metalTypeId, r]));
 
-      // Validate all rates exist
+      // Validate all rates exist for items that need them
       for (const metalTypeId of metalTypeIds) {
-        if (!rateMap.has(metalTypeId)) {
+        const needsTodayRate = stockItems.some(s =>
+          s.metalTypeId === metalTypeId &&
+          (s.origin !== 'KARIGAR' || !s.productionItem?.productionReturn?.productionIssue?.rateAtIssuePerGram)
+        );
+        if (needsTodayRate && !rateMap.has(metalTypeId)) {
           throw new BadRequestException(
             `No current daily rate found for metal ${metalTypeId}. Please set today's rate first.`,
           );
@@ -107,22 +181,83 @@ export class SalesService {
       const lineDtoMap = new Map(items.map(i => [i.stockItemId, i]));
 
       for (const stockItem of stockItems) {
-        const itemRate = rateMap.get(stockItem.metalTypeId!)!;
         const lineDto = lineDtoMap.get(stockItem.id)!;
 
-        const pricing = await this.stockService.calculatePrice(stockItem, itemRate, {
-          jertyOverride: lineDto.jertyOverride,
-          jyalaOverride: lineDto.jyalaOverride,
-        });
+        // Update stock item with overrides
+        const updateData: any = {};
+        if (lineDto.jertyOverride) {
+          const jertyW = WeightUtil.from(lineDto.jertyOverride.value, lineDto.jertyOverride.unit);
+          updateData.jertyGram = jertyW.gram;
+          updateData.jertyTola = jertyW.tola;
+          updateData.jertyLal = jertyW.lal;
+        }
 
-        subTotal = subTotal.plus(pricing.grandTotalNpr);
+        // Check if lineDto has jyalaBreakdown (we need to update sales.dto.ts too!)
+        if (lineDto.jyalaBreakdown) {
+          const jyala = {
+            making: lineDto.jyalaBreakdown.makingChargeNpr ?? Number(stockItem.makingChargeNpr),
+            stone: lineDto.jyalaBreakdown.stoneChargeNpr ?? Number(stockItem.stoneChargeNpr),
+            moti: lineDto.jyalaBreakdown.motiChargeNpr ?? Number(stockItem.motiChargeNpr),
+            mala: lineDto.jyalaBreakdown.malaChargeNpr ?? Number(stockItem.malaChargeNpr),
+            other: lineDto.jyalaBreakdown.otherChargeNpr ?? Number(stockItem.otherChargeNpr),
+          };
+          updateData.makingChargeNpr = jyala.making;
+          updateData.stoneChargeNpr = jyala.stone;
+          updateData.motiChargeNpr = jyala.moti;
+          updateData.malaChargeNpr = jyala.mala;
+          updateData.otherChargeNpr = jyala.other;
+          updateData.totalJyalaNpr = jyala.making + jyala.stone + jyala.moti + jyala.mala + jyala.other;
+        } else if (lineDto.jyalaOverride != null) {
+          // If only jyalaOverride is provided, we can't update the breakdown, just the total?
+          // Or maybe we should just use it in calculatePrice
+        }
+
+        if (lineDto.applyLuxuryTax !== undefined) {
+          updateData.applyLuxuryTax = lineDto.applyLuxuryTax;
+        }
+
+        if (lineDto.applyVat !== undefined) {
+          updateData.applyVat = lineDto.applyVat;
+        }
+
+        if (Object.keys(updateData).length > 0) {
+          await tx.stockItem.update({
+            where: { id: stockItem.id },
+            data: updateData,
+          });
+        }
+
+        // Resolve rate: historical for KARIGAR, today's for everything else
+        let itemRate: any = null;
+        if (stockItem.origin === 'KARIGAR') {
+          const issueRate = stockItem.productionItem?.productionReturn?.productionIssue?.rateAtIssuePerGram;
+          if (issueRate) {
+            itemRate = {
+              sellRatePerGram: issueRate,
+              ratePerGram:     issueRate,
+            };
+          } else {
+            console.warn(`Warning: failed to resolve historical rate for karigar stock item ${stockItem.id}. Using today's rate.`);
+            itemRate = rateMap.get(stockItem.metalTypeId!)!;
+          }
+        } else {
+          itemRate = rateMap.get(stockItem.metalTypeId!)!;
+        }
+
+        const pricing = await this.stockService.calculatePrice(stockItem, itemRate, lineDto);
+
+        subTotal = subTotal.plus(new Decimal(pricing.grandTotalNpr));
+
+        // Record the actual rate used on the line so the bill is self-evidencing.
+        const rateUsedPerGram =
+          itemRate?.sellRatePerGram ?? itemRate?.ratePerGram ?? 0;
 
         lineData.push({
           stockItemId: stockItem.id,
           grossWeightGram: Number(stockItem.grossWeightGram),
           jertyGram: parseFloat(pricing.jertyWeight.raw.gram.toFixed(4)),
           billableGram: parseFloat(pricing.billableWeight.raw.gram.toFixed(4)),
-          ratePerGram: itemRate.sellRatePerGram,
+          ratePerGram: rateUsedPerGram,
           metalValueNpr: pricing.metalValueNpr,
           jyalaNpr: pricing.jyalaCustomerView,
           makingChargeNpr: pricing.jyalaOwnerView.makingCharge,
@@ -139,19 +274,38 @@ export class SalesService {
 
       const grandTotal = subTotal;
       const paidAmount = new Decimal(payment.amountNpr);
+
+      if (paidAmount.greaterThan(grandTotal.mul(2))) {
+        throw new BadRequestException(
+          `Payment amount (NPR ${paidAmount.toFixed(2)}) is more than twice the ` +
+          `grand total (NPR ${grandTotal.toFixed(2)}). Please verify the amount.`,
+        );
+      }
+
       const balance = grandTotal.minus(paidAmount);
 
       // ── Create transaction ────────────────────────────────────────────────
-      // Use the first item's rate as the primary dailyRateId on the transaction
-      const primaryRate = rateMap.get(stockItems[0].metalTypeId!)!;
+      // primaryRate is the DailyRate record linked on the transaction header for
+      // reference / audit. KARIGAR items use their historical rate stored on the
+      // line; the header rate is informational only (null if all items are karigar).
+      const primaryRate = rateMap.size > 0
+        ? rateMap.get(stockItems.find(s => s.origin !== 'KARIGAR')?.metalTypeId ?? '')
+          ?? rateMap.values().next().value
+        : null;
+
+      // ── Snapshot customer details onto the invoice ────────────────────────
+      const custSnapshot = await this.resolveCustomerSnapshot(
+        tx, resolvedCustomerId, newCustomerName, newCustomerPhone, newCustomerAddress,
+      );
 
       const txn = await tx.transaction.create({
         data: {
           billNumber: billNum,
           txType: 'SELL',
-          customerId,
+          customerId: resolvedCustomerId,
+          ...custSnapshot,
           createdByUserId: userId,
-          dailyRateId: primaryRate.id,
+          dailyRateId: primaryRate?.id ?? null,
           subTotalNpr: subTotal,
           grandTotalNpr: grandTotal,
           paidAmountNpr: paidAmount,
@@ -226,6 +380,13 @@ export class SalesService {
       let refundTotal = new Decimal(0);
       const lineData: any[] = [];
 
+      // ── Snapshot customer from original transaction ────────────────────────
+      const custSnapshot = {
+        customerName:    originalTx.customerName   ?? null,
+        customerPhone:   originalTx.customerPhone  ?? null,
+        customerAddress: originalTx.customerAddress ?? null,
+      };
+
       for (const returnItem of items) {
         const stockItem = await tx.stockItem.findUnique({
           where: { id: returnItem.stockItemId },
@@ -269,6 +430,7 @@ export class SalesService {
           billNumber: billNum,
           txType: 'RETURN',
           customerId: originalTx.customerId,
+          ...custSnapshot,
           createdByUserId: userId,
           relatedTxId: originalTxId,
           subTotalNpr: refundTotal,
@@ -485,11 +647,15 @@ for (const inItem of oldGoldItemsIn) {
       const paidAmount = new Decimal(payment.amountNpr);
       const balance = cashDiff.minus(paidAmount);
 
+      // ── Snapshot customer details ─────────────────────────────────────────
+      const custSnapshot = await this.resolveCustomerSnapshot(tx, customerId);
+
       const txn = await tx.transaction.create({
         data: {
           billNumber: billNum,
           txType: 'EXCHANGE',
           customerId,
+          ...custSnapshot,
           createdByUserId: userId,
           exchangeGroupId,
           subTotalNpr: outTotal,
@@ -541,11 +707,15 @@ for (const inItem of oldGoldItemsIn) {
       const billNum = await this.billNumber.generate(tx);
       const paidAmount = new Decimal(payment.amountNpr);
 
+      // ── Snapshot customer details ─────────────────────────────────────────
+      const custSnapshot = await this.resolveCustomerSnapshot(tx, customerId);
+
       const txn = await tx.transaction.create({
         data: {
           billNumber: billNum,
           txType: 'BUY_BACK',
           customerId,
+          ...custSnapshot,
           createdByUserId: userId,
           relatedTxId: relatedSaleTxId,
           subTotalNpr: totalNpr,
@@ -594,11 +764,15 @@ for (const inItem of oldGoldItemsIn) {
       const billNum = await this.billNumber.generate(tx);
       const paidAmount = new Decimal(payment.amountNpr);
 
+      // ── Snapshot customer details ─────────────────────────────────────────
+      const custSnapshot = await this.resolveCustomerSnapshot(tx, customerId);
+
       const txn = await tx.transaction.create({
         data: {
           billNumber: billNum,
           txType: 'OLD_GOLD',
           customerId,
+          ...custSnapshot,
           createdByUserId: userId,
           subTotalNpr: totalNpr,
           grandTotalNpr: totalNpr,
@@ -795,9 +969,11 @@ for (const inItem of oldGoldItemsIn) {
 
   private fullTxInclude() {
     return {
-      customer: { select: { id: true, name: true, phoneHint: true } },
+      customer: { select: { id: true, name: true, phoneHint: true, address: true } },
       createdBy: { select: { id: true, name: true } },
-      dailyRate: true,
+      dailyRate: {
+        include: { metalType: { select: { id: true, name: true } } },
+      },
       lines: {
         include: {
           stockItem: {
@@ -811,6 +987,51 @@ for (const inItem of oldGoldItemsIn) {
       payments: true,
       buybackRecord: true,
       relatedTx: { select: { id: true, billNumber: true, txType: true } },
+    };
+  }
+
+  /**
+   * Fetch and return a snapshot of customer details to be stored on each transaction.
+   * For new customers (provided inline), we use the supplied values directly.
+   * For existing customers referenced by ID, we look up the DB.
+   * Returns { customerName, customerPhone, customerAddress } or all nulls.
+   */
+  private async resolveCustomerSnapshot(
+    tx: any,
+    customerId?: string | null,
+    newCustomerName?: string,
+    newCustomerPhone?: string,
+    newCustomerAddress?: string,
+  ): Promise<{ customerName: string | null; customerPhone: string | null; customerAddress: string | null }> {
+    // If inline new customer fields are given, prefer them
+    if (!customerId && newCustomerName) {
+      const normalised = newCustomerPhone?.replace(/[\s\-()]/g, '') ?? '';
+      const digits = normalised.replace(/\D/g, '');
+      const phoneHint = newCustomerPhone ? `****${digits.slice(-4)}` : null;
+      return {
+        customerName:    newCustomerName,
+        customerPhone:   phoneHint,
+        customerAddress: newCustomerAddress ?? null,
+      };
+    }
+
+    if (!customerId) {
+      return { customerName: null, customerPhone: null, customerAddress: null };
+    }
+
+    const customer = await tx.customer.findUnique({
+      where: { id: customerId },
+      select: { name: true, phoneHint: true, address: true },
+    });
+
+    if (!customer) {
+      return { customerName: null, customerPhone: null, customerAddress: null };
+    }
+
+    return {
+      customerName:    customer.name,
+      customerPhone:   customer.phoneHint ?? null,
+      customerAddress: customer.address   ?? null,
     };
   }
 
@@ -836,17 +1057,66 @@ for (const inItem of oldGoldItemsIn) {
       },
     }));
 
-    const customerLines = txn.lines?.map((line: any) => ({
-      sku: line.stockItem?.sku,
-      category: line.stockItem?.category?.name,
-      metalType: line.stockItem?.metalType?.name,
-      weight: WeightUtil.forBill(Number(line.grossWeightGram)),
-      metalValue: line.metalValueNpr,
-      jyala: line.jyalaNpr,         // single line — no breakdown
-      luxuryTax: line.luxuryTaxNpr,
-      vat: line.vatNpr,
-      lineTotal: line.lineTotalNpr,
-    }));
+    const customerLines = txn.lines?.map((line: any) => {
+      const grossGram = Number(line.grossWeightGram);
+      const jertyGram = Number(line.jertyGram);
+      const billableGram = Number(line.billableGram);
+      const metalValue = Number(line.metalValueNpr);
+      const jyala = Number(line.jyalaNpr);
+      const addonValue = Number(line.addonValueNpr ?? 0);
+      const luxuryTax = Number(line.luxuryTaxNpr);
+      const vat = Number(line.vatNpr);
+      const tax = luxuryTax + vat;
+      const amount = metalValue + jyala + addonValue;
+      const itemName =
+        line.stockItem?.name?.trim() ||
+        [line.stockItem?.category?.name, line.stockItem?.metalType?.name]
+          .filter(Boolean)
+          .join(' ') ||
+        'Item';
+
+      return {
+        itemName,
+        sku: line.stockItem?.sku,
+        category: line.stockItem?.category?.name,
+        metalType: line.stockItem?.metalType?.name,
+        ratePerGram: line.ratePerGram,
+        grossWeight: WeightUtil.forBill(grossGram),
+        jertyWeight: WeightUtil.forBill(jertyGram),
+        totalWeight: WeightUtil.forBill(billableGram),
+        weight: WeightUtil.forBill(grossGram), // backwards compatibility
+        metalValue: line.metalValueNpr,
+        jyala: line.jyalaNpr,
+        amount: amount.toFixed(2),
+        discount: '0.00',
+        tax: tax.toFixed(2),
+        luxuryTax: line.luxuryTaxNpr,
+        vat: line.vatNpr,
+        lineTotal: line.lineTotalNpr,
+      };
+    });
+
+    const billTaxTotal = txn.lines?.reduce(
+      (sum: number, line: any) =>
+        sum + Number(line.luxuryTaxNpr) + Number(line.vatNpr),
+      0,
+    ) ?? 0;
+
+    const resolvedBillCustomer = txn.customer
+      ? {
+          ...txn.customer,
+          name: txn.customerName ?? txn.customer.name,
+          phoneHint: txn.customerPhone ?? txn.customer.phoneHint,
+          address: txn.customerAddress ?? txn.customer.address,
+        }
+      : txn.customerName
+      ? {
+          id: txn.customerId ?? null,
+          name: txn.customerName,
+          phoneHint: txn.customerPhone,
+          address: txn.customerAddress,
+        }
+      : null;
 
     return {
       ...txn,
@@ -854,7 +1124,7 @@ for (const inItem of oldGoldItemsIn) {
       ownerBill: {
         billNumber: txn.billNumber,
         date: txn.createdAt,
-        customer: txn.customer,
+        customer: resolvedBillCustomer,
         lines: ownerLines,
         subTotal: txn.subTotalNpr,
         grandTotal: txn.grandTotalNpr,
@@ -865,13 +1135,53 @@ for (const inItem of oldGoldItemsIn) {
       customerBill: {
         billNumber: txn.billNumber,
         date: txn.createdAt,
-        customer: txn.customer,
+        customer: resolvedBillCustomer,
+        rates: this.buildBillRates(txn),
+        rateDate: txn.dailyRate?.effectiveDate ?? txn.createdAt,
         lines: customerLines,
         subTotal: txn.subTotalNpr,
+        discount: txn.discountNpr,
+        tax: billTaxTotal.toFixed(2),
         grandTotal: txn.grandTotalNpr,
         paid: txn.paidAmountNpr,
         balance: txn.balanceNpr,
       },
     };
+  }
+
+  /** Unique sell rates applied on this bill (per metal), from line snapshots or header daily rate. */
+  private buildBillRates(txn: any) {
+    const seen = new Map<string, {
+      metalType: string;
+      ratePerGram: unknown;
+      ratePerTola: string;
+      effectiveDate?: Date;
+    }>();
+
+    for (const line of txn.lines ?? []) {
+      const rateGram = Number(line.ratePerGram);
+      if (!rateGram) continue;
+      const metal = line.stockItem?.metalType?.name ?? 'Metal';
+      const key = `${metal}:${rateGram.toFixed(2)}`;
+      if (!seen.has(key)) {
+        seen.set(key, {
+          metalType: metal,
+          ratePerGram: line.ratePerGram,
+          ratePerTola: (rateGram * GRAMS_PER_TOLA).toFixed(2),
+        });
+      }
+    }
+
+    if (seen.size === 0 && txn.dailyRate) {
+      const dr = txn.dailyRate;
+      return [{
+        metalType: dr.metalType?.name ?? 'Metal',
+        ratePerGram: dr.sellRatePerGram,
+        ratePerTola: dr.sellRatePerTola,
+        effectiveDate: dr.effectiveDate,
+      }];
+    }
+
+    return Array.from(seen.values());
   }
 }

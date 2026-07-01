@@ -544,5 +544,44 @@ describe('Sales Integration Tests (e2e)', () => {
 
       expect(res.body.success).toBe(false);
     });
+
+    it('POST /api/v1/sales/sell → should auto-register a new customer if customerId is omitted but newCustomerName is provided', async () => {
+      const freshItemId = await createFreshStockItem();
+      const uniquePhone = `985${Math.floor(1000000 + Math.random() * 9000000)}`;
+
+      const res = await request(app.getHttpServer())
+        .post('/api/v1/sales/sell')
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({
+          newCustomerName: 'Auto Created Customer',
+          newCustomerPhone: uniquePhone,
+          newCustomerAddress: 'POS Street 12',
+          items: [
+            {
+              stockItemId: freshItemId,
+              jertyOverride: null,
+              jyalaOverride: null,
+            },
+          ],
+          payment: {
+            amountNpr: 50000,
+            method: 'CASH',
+          },
+        })
+        .expect(201);
+
+      expect(res.body.success).toBe(true);
+      expect(res.body.data.id).toBeDefined();
+
+      // Verify customer was created in DB and is linked to the transaction
+      const txn = await prisma.transaction.findUnique({
+        where: { id: res.body.data.id },
+        include: { customer: true },
+      });
+
+      expect(txn?.customerId).toBeDefined();
+      expect(txn?.customer?.name).toBe('Auto Created Customer');
+      expect(txn?.customer?.address).toBe('POS Street 12');
+    });
   });
 });

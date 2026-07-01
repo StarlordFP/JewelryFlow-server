@@ -90,10 +90,10 @@ export class JyalaBreakdownDto {
 
 export class StockItemOriginDto {
   /** Origin type for this stock item */
-  @ApiProperty({ description: 'Origin type for this stock item', enum: ['PURCHASED', 'KARIGAR', 'TRADE'], example: 'PURCHASED' })
+  @ApiProperty({ description: 'Origin type for this stock item', enum: ['PURCHASED', 'KARIGAR', 'TRADE', 'REMAKE'], example: 'PURCHASED' })
   @IsString()
-  @IsIn(['PURCHASED', 'KARIGAR', 'TRADE'])
-  type!: 'PURCHASED' | 'KARIGAR' | 'TRADE';
+  @IsIn(['PURCHASED', 'KARIGAR', 'TRADE', 'REMAKE'])
+  type!: 'PURCHASED' | 'KARIGAR' | 'TRADE' | 'REMAKE';
 
   /** Trade item ID when origin=TRADE */
   @ApiPropertyOptional({ description: 'Trade item ID when origin=TRADE', example: 'clp789def' })
@@ -237,16 +237,35 @@ export class UpdateStockItemDto {
   @Type(() => WeightInputDto)
   jertyWeight?: WeightInputDto;
 
-  /**
-   * Update jyala breakdown — mutable after stock entry and at bill time.
-   * Updating this recalculates totalJyalaNpr automatically.
-   */
+  /** Updated gross weight */
+  @ApiPropertyOptional({ description: 'Updated gross weight', type: WeightInputDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => WeightInputDto)
+  grossWeight?: WeightInputDto;
+
   @ApiPropertyOptional({ description: 'Updated item name or label', example: '22K Gold Ring' })
   @IsOptional()
   @IsString()
   @MinLength(1)
   @MaxLength(200)
   name?: string;
+
+  @ApiPropertyOptional({ description: 'Updated category ID', example: 'clp123xyz' })
+  @IsOptional()
+  @IsString()
+  categoryId?: string;
+
+  @ApiPropertyOptional({ description: 'Updated metal type ID', example: 'clp456abc' })
+  @IsOptional()
+  @IsString()
+  metalTypeId?: string;
+
+  @ApiPropertyOptional({ description: 'Updated karat', enum: [24, 22, 18, 14], example: 22 })
+  @IsOptional()
+  @IsInt()
+  @IsIn([24, 22, 18, 14])
+  karat?: number;
 
   @ApiPropertyOptional({ description: 'Updated jyala breakdown (recalculates totalJyalaNpr)', type: JyalaBreakdownDto })
   @IsOptional()
@@ -282,10 +301,10 @@ export class UpdateStockItemDto {
 
 export class UpdateStockStatusDto {
   /** New status for the stock item */
-  @ApiProperty({ description: 'New status', enum: ['IN_STOCK', 'RESERVED', 'SCRAPPED'], example: 'RESERVED' })
+  @ApiProperty({ description: 'New status', enum: ['IN_STOCK', 'RESERVED', 'SCRAPPED', 'UNDER_DISPUTE', 'IN_REMAKE', 'REMADE'], example: 'RESERVED' })
   @IsString()
-  @IsIn(['IN_STOCK', 'RESERVED', 'SCRAPPED'])
-  status!: 'IN_STOCK' | 'RESERVED' | 'SCRAPPED';
+  @IsIn(['IN_STOCK', 'RESERVED', 'SCRAPPED', 'UNDER_DISPUTE', 'IN_REMAKE', 'REMADE'])
+  status!: 'IN_STOCK' | 'RESERVED' | 'SCRAPPED' | 'UNDER_DISPUTE' | 'IN_REMAKE' | 'REMADE';
 
   @ApiPropertyOptional({ description: 'Status change notes', example: 'Customer requested reservation', maxLength: 300 })
   @IsOptional()
@@ -323,6 +342,34 @@ export class PricePreviewDto {
   @IsNumber()
   @Min(0)
   jyalaOverride?: number;
+
+  /**
+   * Override jyala breakdown at bill time (optional — e.g. customer bargains down).
+   * If provided, this replaces the stored jyala breakdown.
+   */
+  @ApiPropertyOptional({ description: 'Override jyala breakdown at bill time', type: JyalaBreakdownDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => JyalaBreakdownDto)
+  jyalaBreakdown?: JyalaBreakdownDto;
+
+  /**
+   * Override applyLuxuryTax at bill time (optional).
+   * If not provided, uses the value stored on the stock item.
+   */
+  @ApiPropertyOptional({ description: 'Override luxury tax toggle at bill time', example: false })
+  @IsOptional()
+  @IsBoolean()
+  applyLuxuryTax?: boolean;
+
+  /**
+   * Override applyVat at bill time (optional).
+   * If not provided, uses the value stored on the stock item.
+   */
+  @ApiPropertyOptional({ description: 'Override VAT toggle at bill time', example: false })
+  @IsOptional()
+  @IsBoolean()
+  applyVat?: boolean;
 
   /** Use a specific daily rate ID instead of today's current rate */
   @ApiPropertyOptional({ description: 'Specific daily rate ID (defaults to today\'s rate)', example: 'clp456abc' })
@@ -408,10 +455,10 @@ export class StockQueryDto {
   origin?: 'PURCHASED' | 'KARIGAR' | 'TRADE';
 
   /** Filter by status */
-  @ApiPropertyOptional({ description: 'Filter by status', enum: ['IN_STOCK', 'RESERVED', 'SOLD', 'RETURNED', 'SCRAPPED'] })
+  @ApiPropertyOptional({ description: 'Filter by status', enum: ['IN_STOCK', 'RESERVED', 'SOLD', 'RETURNED', 'SCRAPPED', 'UNDER_DISPUTE', 'IN_REMAKE', 'REMADE'] })
   @IsOptional()
   @IsString()
-  @IsIn(['IN_STOCK', 'RESERVED', 'SOLD', 'RETURNED', 'SCRAPPED'])
+  @IsIn(['IN_STOCK', 'RESERVED', 'SOLD', 'RETURNED', 'SCRAPPED', 'UNDER_DISPUTE', 'IN_REMAKE', 'REMADE'])
   status?: string;
 
   /** Filter by minimum gross weight in grams */

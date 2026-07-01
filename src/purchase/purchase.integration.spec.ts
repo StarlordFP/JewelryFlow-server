@@ -150,7 +150,8 @@ describe('Purchase Orders Integration Tests (e2e)', () => {
           supplierId,
           lines: [
             {
-              description: 'Gold Necklace',
+              description: 'Necklace from Sharma batch',
+              itemName: 'Gold Necklace',
               categoryId,
               metalTypeId: goldMetalTypeId,
               grossWeight: { value: 15, unit: 'gram' },
@@ -219,20 +220,13 @@ describe('Purchase Orders Integration Tests (e2e)', () => {
         status: 'RECEIVED',
       });
 
-      // Verify stock items were created
-      const createdStockItems = await prisma.stockItem.findMany({
-        where: {
-          origin: 'PURCHASED',
-        },
+      // Verify stock item linked to this PO line
+      const poLine = await prisma.purchaseOrderLine.findUnique({
+        where: { id: purchaseOrderLineId },
+        include: { stockItem: true },
       });
-
-      expect(createdStockItems.length).toBeGreaterThan(0);
-
-      // Verify SKU format
-      const itemFromPO = createdStockItems.find(
-        (s) => s.origin === 'PURCHASED',
-      );
-      expect(itemFromPO?.sku).toMatch(/^PUR-\d+/);
+      expect(poLine?.stockItem?.sku).toMatch(/^PUR-\d+/);
+      expect(poLine?.stockItem?.name).toBe('Gold Necklace');
     });
 
     it('PATCH /api/v1/purchase-orders/:id/receive → created stock item should have IN_STOCK status', async () => {
@@ -244,7 +238,8 @@ describe('Purchase Orders Integration Tests (e2e)', () => {
           supplierId,
           lines: [
             {
-              description: 'Gold Ring',
+              description: 'Ring order line',
+              itemName: 'Gold Ring',
               categoryId,
               metalTypeId: goldMetalTypeId,
               grossWeight: { value: 10, unit: 'gram' },
@@ -278,6 +273,7 @@ describe('Purchase Orders Integration Tests (e2e)', () => {
 
       const createdItem = stockItems[stockItems.length - 1];
       expect(createdItem.status).toBe('IN_STOCK');
+      expect(createdItem.name).toBe('Gold Ring');
     });
 
     it('PATCH /api/v1/purchase-orders/:id/cancel → should not allow cancel if already received', async () => {
@@ -299,7 +295,8 @@ describe('Purchase Orders Integration Tests (e2e)', () => {
           supplierId,
           lines: [
             {
-              description: 'Gold Bangle',
+              description: 'Bangle PO line',
+              itemName: 'Gold Bangle',
               categoryId,
               metalTypeId: goldMetalTypeId,
               grossWeight: { value: 20, unit: 'gram' },
@@ -360,7 +357,8 @@ describe('Purchase Orders Integration Tests (e2e)', () => {
           supplierId: 'invalid-supplier-id',
           lines: [
             {
-              description: 'Gold Item',
+              description: 'Test item',
+              itemName: 'Gold Item',
               categoryId,
               metalTypeId: goldMetalTypeId,
               grossWeight: { value: 10, unit: 'gram' },
@@ -394,7 +392,8 @@ describe('Purchase Orders Integration Tests (e2e)', () => {
           supplierId,
           lines: [
             {
-              description: 'Invalid Item',
+              description: 'Bad weight test',
+              itemName: 'Invalid Item',
               categoryId,
               metalTypeId: goldMetalTypeId,
               grossWeight: { value: -10, unit: 'gram' }, // Invalid

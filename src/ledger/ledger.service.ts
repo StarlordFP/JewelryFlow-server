@@ -3,7 +3,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { GRAMS_PER_TOLA } from '../common/constants/weight.constants';
-import { GoldLedgerQueryDto } from './dto/ledger.dto';
+import { GoldLedgerQueryDto, ProfitReportQueryDto } from './dto/ledger.dto';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -29,6 +29,29 @@ interface GoldMovement {
   reference: string;
   createdBy: { id: string; name: string } | null;
   _sortDate: Date;      // internal sort key — stripped before response
+}
+
+// Where the cost (buying) rate for a sold item came from
+type CostRateSource = 'PURCHASE_RATE' | 'ENTRY_RATE' | 'UNKNOWN';
+
+interface ProfitRow {
+  id: string;            // TransactionLine id
+  date: string;
+  billNumber: string;
+  sku: string | null;
+  itemName: string | null;
+  origin: string | null;
+  metalType: { id: string; name: string } | null;
+  billableGram: string;
+  billableTola: string;
+  soldRatePerGram: string;
+  costRatePerGram: string | null;
+  costRateSource: CostRateSource;
+  metalRevenueNpr: string;        // sold rate × billable gram
+  metalCostNpr: string | null;    // cost rate × billable gram
+  metalProfitNpr: string | null;  // revenue − cost
+  createdBy: { id: string; name: string } | null;
+  _sortDate: Date;                // internal sort key — stripped before response
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -109,6 +132,7 @@ export class LedgerService {
           productionOrder: {
             include: {
               karigar: { select: { id: true, name: true } },
+              createdBy: { select: { id: true, name: true } },
             },
           },
         },
@@ -139,6 +163,7 @@ export class LedgerService {
           productionOrder: {
             include: {
               karigar: { select: { id: true, name: true } },
+              createdBy: { select: { id: true, name: true } },
             },
           },
         },
@@ -316,7 +341,7 @@ export class LedgerService {
         ratePerGram: fmtV(Number(issue.rateAtIssuePerGram)),
         valueNpr:    fmtV(Number(issue.rateAtIssuePerGram) * gram),
         reference:   issue.productionOrderId,
-        createdBy:   null, // ProductionOrder has no createdBy in schema
+        createdBy:   issue.productionOrder.createdBy ?? null,
         _sortDate:   issue.issuedAt,
       });
     }
@@ -335,7 +360,7 @@ export class LedgerService {
         ratePerGram: null,
         valueNpr:    null,
         reference:   ret.productionOrderId,
-        createdBy:   null, // ProductionOrder has no createdBy in schema
+        createdBy:   ret.productionOrder.createdBy ?? null,
         _sortDate:   ret.returnedAt,
       });
     }
@@ -572,6 +597,154 @@ export class LedgerService {
         lastTransactionDate,
       },
       transactions: txList,
+    };
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  //  PROFIT / RATE-COMPARISON REPORT
+  // ════════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Per-sold-line comparison of the rate the metal was acquired at (cost) versus
+   * the rate it was sold at, with the resulting metal-level profit.
+   *
+   *  - Cost rate priority:
+   *      1. PurchaseOrderLine.rateAtPurchasePerGram  (origin = PURCHASED, actual buy rate)
+   *      2. StockItem.entryRate.sellRatePerGram        (rate snapshot when item entered stock)
+   *      3. null → UNKNOWN (excluded from profit totals)
+   *  - Sold rate: TransactionLine.ratePerGram
+   *  - Profit is metal-only (jyala / making charges are not part of this comparison).
+   *
+   * Only SELL transactions are considered.
+   */
+  async getProfitReport(query: ProfitReportQueryDto) {
+    const { metalTypeId, from, to, page = 1, limit = 50 } = query;
+
+    const dateGte = from ? new Date(from) : undefined;
+    const dateLte = to   ? new Date(to)   : undefined;
+
+    const sellLines = await this.prisma.transactionLine.findMany({
+      where: {
+        stockItemId: { not: null },
+        transaction: {
+          txType: 'SELL',
+          ...(dateGte || dateLte
+            ? {
+                createdAt: {
+                  ...(dateGte ? { gte: dateGte } : {}),
+                  ...(dateLte ? { lte: dateLte } : {}),
+                },
+              }
+            : {}),
+        },
+        ...(metalTypeId ? { stockItem: { metalTypeId } } : {}),
+      },
+      include: {
+        transaction: {
+          include: { createdBy: { select: { id: true, name: true } } },
+        },
+        stockItem: {
+          include: {
+            metalType:         { select: { id: true, name: true } },
+            entryRate:         { select: { sellRatePerGram: true } },
+            purchaseOrderLine: { select: { rateAtPurchasePerGram: true } },
+          },
+        },
+      },
+    });
+
+    // ── Map each sold line to a ProfitRow ─────────────────────────────────────
+    const rows: ProfitRow[] = [];
+
+    for (const line of sellLines) {
+      const item = line.stockItem;
+      if (!item) continue; // guarded by where clause, but keep TS happy
+
+      const billableGram   = Number(line.billableGram);
+      const soldRatePerGram = Number(line.ratePerGram);
+      const metalRevenueNpr = Number(line.metalValueNpr);
+
+      // Resolve cost rate
+      let costRatePerGram: number | null = null;
+      let costRateSource: CostRateSource = 'UNKNOWN';
+
+      const purchaseRate = item.purchaseOrderLine?.rateAtPurchasePerGram;
+      if (item.origin === 'PURCHASED' && purchaseRate != null) {
+        costRatePerGram = Number(purchaseRate);
+        costRateSource  = 'PURCHASE_RATE';
+      } else if (item.entryRate?.sellRatePerGram != null) {
+        costRatePerGram = Number(item.entryRate.sellRatePerGram);
+        costRateSource  = 'ENTRY_RATE';
+      }
+
+      const metalCostNpr =
+        costRatePerGram != null ? costRatePerGram * billableGram : null;
+      const metalProfitNpr =
+        metalCostNpr != null ? metalRevenueNpr - metalCostNpr : null;
+
+      rows.push({
+        id:              line.id,
+        date:            line.transaction.createdAt.toISOString(),
+        billNumber:      line.transaction.billNumber,
+        sku:             item.sku ?? null,
+        itemName:        item.name ?? null,
+        origin:          item.origin,
+        metalType:       item.metalType,
+        billableGram:    fmtW(billableGram),
+        billableTola:    fmtW(toTola(billableGram)),
+        soldRatePerGram: fmtV(soldRatePerGram) as string,
+        costRatePerGram: fmtV(costRatePerGram),
+        costRateSource,
+        metalRevenueNpr: fmtV(metalRevenueNpr) as string,
+        metalCostNpr:    fmtV(metalCostNpr),
+        metalProfitNpr:  fmtV(metalProfitNpr),
+        createdBy:       line.transaction.createdBy ?? null,
+        _sortDate:       line.transaction.createdAt,
+      });
+    }
+
+    // ── Sort by date descending ──────────────────────────────────────────────
+    rows.sort((a, b) => b._sortDate.getTime() - a._sortDate.getTime());
+
+    // ── Summary — profit only summed over lines with a known cost ────────────
+    let totalMetalRevenueNpr = 0;
+    let totalMetalCostNpr    = 0;
+    let totalMetalProfitNpr  = 0;
+    let linesWithKnownCost   = 0;
+    let linesWithUnknownCost = 0;
+
+    for (const r of rows) {
+      totalMetalRevenueNpr += parseFloat(r.metalRevenueNpr);
+      if (r.metalCostNpr !== null && r.metalProfitNpr !== null) {
+        totalMetalCostNpr   += parseFloat(r.metalCostNpr);
+        totalMetalProfitNpr += parseFloat(r.metalProfitNpr);
+        linesWithKnownCost  += 1;
+      } else {
+        linesWithUnknownCost += 1;
+      }
+    }
+
+    const summary = {
+      totalMetalRevenueNpr: totalMetalRevenueNpr.toFixed(2),
+      totalMetalCostNpr:    totalMetalCostNpr.toFixed(2),
+      totalMetalProfitNpr:  totalMetalProfitNpr.toFixed(2),
+      totalLines:           rows.length,
+      linesWithKnownCost,
+      linesWithUnknownCost,
+    };
+
+    // ── Paginate (in-memory) ─────────────────────────────────────────────────
+    const total = rows.length;
+    const pages = Math.ceil(total / limit);
+    const skip  = (page - 1) * limit;
+    const paged = rows.slice(skip, skip + limit);
+
+    const data = paged.map(({ _sortDate: _d, ...rest }) => rest);
+
+    return {
+      summary,
+      data,
+      meta: { total, page, limit, pages },
     };
   }
 }

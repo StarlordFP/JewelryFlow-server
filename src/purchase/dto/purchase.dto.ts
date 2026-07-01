@@ -86,12 +86,19 @@ export class SupplierQueryDto {
 // ─── PURCHASE ORDER LINE ──────────────────────────────────────────────────────
 
 export class CreatePurchaseOrderLineDto {
-  /** Description of the item. Example: "Gold Ring 22K" */
-  @ApiProperty({ description: 'Description of the item', example: 'Gold Ring 22K', minLength: 2, maxLength: 200 })
+  /** PO line notes / supplier reference (kept on the order) */
+  @ApiProperty({ description: 'Line description or notes', example: '22K ring from Sharma batch #12', minLength: 2, maxLength: 200 })
   @IsString()
   @MinLength(2)
   @MaxLength(200)
   description!: string;
+
+  /** Stock item name — shown in inventory after PO is received */
+  @ApiProperty({ description: 'Item name for stock inventory', example: 'Gold Ring 22K', minLength: 2, maxLength: 120 })
+  @IsString()
+  @MinLength(2)
+  @MaxLength(120)
+  itemName!: string;
 
   @ApiPropertyOptional({ description: 'Item category ID', example: 'category-id' })
   @IsOptional()

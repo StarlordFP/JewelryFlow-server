@@ -17,12 +17,12 @@ import { PrismaService } from '../prisma/prisma.service';
 export class StockSkuService {
   constructor(private readonly prisma: PrismaService) {}
 
-  private prefix(origin: 'TRADE' | 'KARIGAR' | 'PURCHASED'): string {
-    return { TRADE: 'TRD', KARIGAR: 'KAR', PURCHASED: 'PUR' }[origin];
+  private prefix(origin: 'TRADE' | 'KARIGAR' | 'PURCHASED' | 'REMAKE'): string {
+    return { TRADE: 'TRD', KARIGAR: 'KAR', PURCHASED: 'PUR', REMAKE: 'RMK' }[origin];
   }
 
   async generateSku(
-    origin: 'TRADE' | 'KARIGAR' | 'PURCHASED',
+    origin: 'TRADE' | 'KARIGAR' | 'PURCHASED' | 'REMAKE',
     tx?: any, // accepts prisma $transaction client
   ): Promise<string> {
     const client = tx ?? this.prisma;

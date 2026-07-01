@@ -71,6 +71,38 @@ export class StockController {
   }
 
   /**
+   * GET /stock/origin-options?type=KARIGAR|TRADE
+   * Trade items or karigar return pieces not yet linked to stock.
+   */
+  @Get('origin-options')
+  @Roles('OWNER', 'MANAGER')
+  @ApiOperation({ summary: 'Origin link options', description: 'List trade items or karigar production items not yet linked to stock' })
+  @ApiQuery({ name: 'type', required: true, enum: ['KARIGAR', 'TRADE'] })
+  originOptions(@Query('type') type: 'KARIGAR' | 'TRADE') {
+    if (!type || !['KARIGAR', 'TRADE'].includes(type)) {
+      throw new BadRequestException('type must be KARIGAR or TRADE');
+    }
+    return this.stockService.getOriginLinkOptions(type);
+  }
+
+  /**
+   * GET /stock/cost-audit
+   * List every stock item with purchase/entry cost-rate status (profit report debugging).
+   */
+  @Get('cost-audit')
+  @Roles('OWNER', 'MANAGER')
+  @ApiOperation({
+    summary: 'Stock cost-rate audit',
+    description:
+      'Shows whether each stock item has a purchase rate or entry rate for profit reporting. ' +
+      'Use from browser console: checkStockCostRates()',
+  })
+  @ApiQuery({ name: 'status', required: false, description: 'Filter by status e.g. IN_STOCK, SOLD' })
+  costAudit(@Query('status') status?: string) {
+    return this.stockService.getCostRateAudit(status ? { status } : undefined);
+  }
+
+  /**
    * PATCH /stock/:id
    * Update jerty, jyala breakdown, tax toggles, notes, photo.
    * Blocked if item is SOLD or SCRAPPED.

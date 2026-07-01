@@ -3,8 +3,14 @@ import {
   IsNumber,
   IsPositive,
   IsOptional,
+  IsArray,
+  ValidateNested,
+  IsBoolean,
+  Min,
+  Max,
 } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
 
 export class SetDailyRateDto {
   /** Metal type ID to set rate for */
@@ -110,3 +116,82 @@ export class RateHistoryQueryDto {
   limit?: number;
 }
 
+export class DerivePreviewQueryDto {
+  @ApiProperty({ description: 'Fine 24K gold sell rate per gram (from FENEGOSIDA fine gold / 10)', example: 10288.07 })
+  @IsNumber()
+  @IsPositive()
+  fineGoldSellPerGram: number;
+
+  @ApiProperty({ description: 'Pure silver sell rate per gram (from FENEGOSIDA silver / 10)', example: 150.0 })
+  @IsNumber()
+  @IsPositive()
+  pureSilverSellPerGram: number;
+}
+
+export class ConfirmRateRowDto {
+  @ApiProperty({ description: 'Metal type ID' })
+  @IsString()
+  metalTypeId: string;
+
+  @ApiPropertyOptional({ description: 'Override sell rate per gram' })
+  @IsOptional()
+  @IsNumber()
+  @IsPositive()
+  sellRatePerGram?: number;
+
+  @ApiPropertyOptional({ description: 'Override buy rate per gram' })
+  @IsOptional()
+  @IsNumber()
+  @IsPositive()
+  buyRatePerGram?: number;
+}
+
+export class ConfirmRatesDto {
+  @ApiPropertyOptional({ description: 'FetchedRateSnapshot ID to mark as consumed' })
+  @IsOptional()
+  @IsString()
+  snapshotId?: string;
+
+  @ApiProperty({ description: 'Fine 24K gold sell rate per gram' })
+  @IsNumber()
+  @IsPositive()
+  fineGoldSellPerGram: number;
+
+  @ApiProperty({ description: 'Pure silver sell rate per gram (FENEGOSIDA, before shop purity factor)' })
+  @IsNumber()
+  @IsPositive()
+  pureSilverSellPerGram: number;
+
+  @ApiPropertyOptional({ description: 'When true, derive all gold karats from 24K base (default true)' })
+  @IsOptional()
+  @IsBoolean()
+  deriveFromGold24k?: boolean;
+
+  @ApiPropertyOptional({ type: [ConfirmRateRowDto], description: 'Per-metal sell/buy overrides' })
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ConfirmRateRowDto)
+  rows?: ConfirmRateRowDto[];
+}
+
+export class PatchRatesSettingsDto {
+  @ApiPropertyOptional({ description: 'Global buy discount percentage (0–100)', example: 5 })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  buyDiscountPct?: number;
+
+  @ApiPropertyOptional({ description: 'Metal type ID for per-metal override' })
+  @IsOptional()
+  @IsString()
+  metalTypeId?: string;
+
+  @ApiPropertyOptional({ description: 'Per-metal buy discount override (%); null clears override' })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  buyDiscountPctOverride?: number | null;
+}

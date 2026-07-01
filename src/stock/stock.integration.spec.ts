@@ -121,14 +121,18 @@ describe('Stock Integration Tests (e2e)', () => {
         jertyWeight: expect.any(Object),
         billableWeight: expect.any(Object),
         ratePerGram: expect.any(String),
-        metalValueNpr: expect.any(String),
+        // metalValueNpr / grandTotalNpr are numeric; *Str variants hold the
+        // formatted display strings (see PricingResult in stock.service.ts).
+        metalValueNpr: expect.any(Number),
+        metalValueNprStr: expect.any(String),
         jyalaOwnerView: expect.objectContaining({
           makingCharge: expect.any(String),
           stoneCharge: expect.any(String),
           total: expect.any(String),
         }),
         jyalaCustomerView: expect.any(String),
-        grandTotalNpr: expect.any(String),
+        grandTotalNpr: expect.any(Number),
+        grandTotalNprStr: expect.any(String),
       });
 
       // Verify weight conversion

@@ -9,9 +9,11 @@ import {
   ValidateNested,
   MaxLength,
   Min,
+  ArrayMinSize,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { WeightInputDto } from '../../trade/dto/trade.dto';
+import { JyalaBreakdownDto } from '../../stock/dto/stock.dto';
 
 // ─── PAYMENT ──────────────────────────────────────────────────────────────────
 
@@ -63,6 +65,31 @@ export class SellLineDto {
   @IsNumber()
   @Min(0)
   jyalaOverride?: number;
+
+  /**
+   * Override jyala breakdown at bill time (optional).
+   * If not provided, uses the stored breakdown on the stock item.
+   */
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => JyalaBreakdownDto)
+  jyalaBreakdown?: JyalaBreakdownDto;
+
+  /**
+   * Override applyLuxuryTax at bill time (optional).
+   * If not provided, uses the stored value on the stock item.
+   */
+  @IsOptional()
+  @IsBoolean()
+  applyLuxuryTax?: boolean;
+
+  /**
+   * Override applyVat at bill time (optional).
+   * If not provided, uses the stored value on the stock item.
+   */
+  @IsOptional()
+  @IsBoolean()
+  applyVat?: boolean;
 }
 
 // ─── CREATE SELL ──────────────────────────────────────────────────────────────
@@ -73,8 +100,24 @@ export class CreateSellDto {
   @IsString()
   customerId?: string;
 
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  newCustomerName?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(30)
+  newCustomerPhone?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(300)
+  newCustomerAddress?: string;
+
   /** One or more items being sold in this bill */
   @IsArray()
+  @ArrayMinSize(1)
   @ValidateNested({ each: true })
   @Type(() => SellLineDto)
   items!: SellLineDto[];

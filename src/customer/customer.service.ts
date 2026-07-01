@@ -5,6 +5,7 @@ import {
 } from '@nestjs/common';
 import { createHash } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
+import { WeightUtil } from '../common/utils/weight.util';
 import {
   CreateCustomerDto,
   UpdateCustomerDto,
@@ -251,6 +252,60 @@ export class CustomerService {
     return {
       data: transactions,
       meta: { total, page, limit, pages: Math.ceil(total / limit) },
+    };
+  }
+
+  /**
+   * Past SELL bills for a customer with line-item detail (read-only).
+   * Newest first, grouped by transaction/bill.
+   */
+  async getPastSales(id: string) {
+    await this.findOrThrow(id);
+
+    const transactions = await this.prisma.transaction.findMany({
+      where: { customerId: id, txType: 'SELL' },
+      orderBy: { createdAt: 'desc' },
+      select: {
+        id: true,
+        billNumber: true,
+        createdAt: true,
+        lines: {
+          include: {
+            stockItem: {
+              include: {
+                category: { select: { name: true } },
+                metalType: { select: { id: true, name: true } },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    return {
+      transactions: transactions.map((tx) => ({
+        id: tx.id,
+        billNumber: tx.billNumber,
+        createdAt: tx.createdAt,
+        lines: tx.lines.map((line) => {
+          const description =
+            line.stockItem?.name?.trim() ||
+            [line.stockItem?.category?.name, line.stockItem?.metalType?.name]
+              .filter(Boolean)
+              .join(' ') ||
+            'Item';
+
+          return {
+            lineId: line.id,
+            stockItemId: line.stockItemId,
+            description,
+            metalTypeId: line.stockItem?.metalType?.id ?? null,
+            metalTypeName: line.stockItem?.metalType?.name ?? null,
+            weight: WeightUtil.forBill(Number(line.grossWeightGram)),
+            ratePerGram: Number(line.ratePerGram),
+          };
+        }),
+      })),
     };
   }
 

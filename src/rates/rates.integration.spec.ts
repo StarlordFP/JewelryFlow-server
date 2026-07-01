@@ -332,4 +332,72 @@ describe('Rates Integration Tests (e2e)', () => {
       expect(res.body.data.buyRatePerTola).toBe('1450.00');
     });
   });
+
+  describe('Flow 2: Fetch-derived confirm flow', () => {
+    it('GET /api/v1/rates/settings → returns buy discount default', async () => {
+      const res = await request(app.getHttpServer())
+        .get('/api/v1/rates/settings')
+        .set('Authorization', `Bearer ${authToken}`)
+        .expect(200);
+
+      expect(res.body.data.buyDiscountPct).toBe(5);
+    });
+
+    it('GET /api/v1/rates/derive-preview → returns gold + silver with derivation math', async () => {
+      const res = await request(app.getHttpServer())
+        .get('/api/v1/rates/derive-preview')
+        .query({ fineGoldSellPerGram: 10000, pureSilverSellPerGram: 150 })
+        .set('Authorization', `Bearer ${authToken}`)
+        .expect(200);
+
+      const rows = res.body.data.rows;
+      const g22 = rows.find((r: any) => r.name.includes('22K'));
+      const silver = rows.find((r: any) => r.name.toLowerCase().includes('silver'));
+
+      expect(g22.derivedSellRatePerGram).toBe('9167.00');
+      expect(silver.derivedSellRatePerGram).toBe('150.00');
+      expect(silver.derivationFormula).toContain('100% pure');
+    });
+
+    it('POST /api/v1/rates/confirm → saves all metals with overrides', async () => {
+      const metalsRes = await request(app.getHttpServer())
+        .get('/api/v1/rates/metal-types')
+        .set('Authorization', `Bearer ${authToken}`)
+        .expect(200);
+
+      const gold24k = metalsRes.body.data.find((m: any) => m.name.includes('24K'));
+      const gold22k = metalsRes.body.data.find((m: any) => m.name.includes('22K'));
+      const silver = metalsRes.body.data.find((m: any) => m.name.toLowerCase().includes('silver'));
+
+      const res = await request(app.getHttpServer())
+        .post('/api/v1/rates/confirm')
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({
+          fineGoldSellPerGram: 10000,
+          pureSilverSellPerGram: 150,
+          deriveFromGold24k: true,
+          rows: [
+            { metalTypeId: gold24k.id, sellRatePerGram: 10050, buyRatePerGram: 9547.5 },
+            { metalTypeId: gold22k.id, sellRatePerGram: 9200, buyRatePerGram: 8740 },
+            { metalTypeId: silver.id, sellRatePerGram: 140, buyRatePerGram: 133 },
+          ],
+        })
+        .expect(201);
+
+      expect(res.body.data.message).toContain('confirmed');
+      expect(res.body.data.rates.length).toBeGreaterThanOrEqual(5);
+
+      const g24 = res.body.data.rates.find((r: any) => r.metalType.name.includes('24K'));
+      expect(g24.sellRatePerGram).toBe('10050.00');
+
+      const g22 = res.body.data.rates.find((r: any) => r.metalType.name.includes('22K'));
+      expect(g22.sellRatePerGram).toBe('9200.00');
+
+      const silverRate = res.body.data.rates.find((r: any) =>
+        r.metalType.name.toLowerCase().includes('silver'),
+      );
+      expect(silverRate.sellRatePerGram).toBe('140.00');
+      expect(silverRate.buyRatePerGram).toBe('133.00');
+    });
+  });
 });

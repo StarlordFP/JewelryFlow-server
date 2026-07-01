@@ -30,6 +30,7 @@ enum StockItemOrigin {
   PURCHASED
   KARIGAR
   TRADE
+  REMAKE
 }
 
 enum StockItemStatus {
@@ -38,6 +39,9 @@ enum StockItemStatus {
   SOLD
   RETURNED
   SCRAPPED
+  UNDER_DISPUTE
+  IN_REMAKE   // source item is currently being remade by karigar
+  REMADE      // source item has been fully remade into new stock
 }
 
 enum JyalaChargeType {
@@ -65,9 +69,21 @@ enum ProductionOrderStatus {
   CANCELLED
 }
 
+enum ProductionOrderLineStatus {
+  PENDING
+  ISSUED
+  WEIGHED
+  APPROVED
+}
+
 enum DisputeStatus {
   PENDING
   RESOLVED
+}
+
+enum DisputeResolutionType {
+  CASH_DEDUCTION
+  METAL_CARRYFORWARD
 }
 
 // ─── PERMISSION ───────────────────────────────────────────────────────────────
@@ -133,6 +149,8 @@ model User {
   dailyRates       DailyRate[]     @relation("RateUpdatedBy")
   transactions     Transaction[]   @relation("TransactionCreatedBy")
   purchaseOrders   PurchaseOrder[] @relation("POCreatedBy")
+  productionOrders ProductionOrder[] @relation("POCreatedBy")
+  resolvedDisputes KarigarDispute[] @relation("DisputeResolvedBy")
 
   @@map("users")
 }
@@ -153,6 +171,13 @@ model UserRole {
   @@map("user_roles")
 }
 
+enum FetchedRateSnapshotStatus {
+  PENDING
+  SUSPICIOUS
+  FAILED
+  CONFIRMED
+}
+
 // ─── METAL TYPE ───────────────────────────────────────────────────────────────
 
 model MetalType {
@@ -160,6 +185,8 @@ model MetalType {
   name         String  @unique
   purityFactor Decimal @db.Decimal(5, 4)
   isActive     Boolean @default(true)
+  // Optional per-metal buy-discount override (%). Falls back to global SystemSetting.
+  buyDiscountPctOverride Decimal? @db.Decimal(5, 2)
 
   dailyRates        DailyRate[]
   stockItems        StockItem[]
@@ -167,6 +194,10 @@ model MetalType {
   jyalaRules        JyalaRule[]
   productionIssues  ProductionIssue[]
   karigarPayments   KarigarPayment[]   @relation("PaymentMetal")
+  karigarMetalBalances KarigarMetalBalance[]
+  karigarDisputes   KarigarDispute[]   @relation("DisputeMetal")
+  productionOrderLines ProductionOrderLine[]
+  productionOrderMetalPools ProductionOrderMetalPool[]
 
   @@map("metal_types")
 }
@@ -204,6 +235,36 @@ model DailyRate {
   @@map("daily_rates")
 }
 
+// ─── SYSTEM SETTING ───────────────────────────────────────────────────────────
+// Key-value store for owner-adjustable business settings (e.g. buy discount %).
+
+model SystemSetting {
+  key   String @id
+  value String
+
+  @@map("system_settings")
+}
+
+// ─── FETCHED RATE SNAPSHOT ────────────────────────────────────────────────────
+// Draft rates from external source — never auto-writes DailyRate; feeds confirm flow.
+
+model FetchedRateSnapshot {
+  id                     String                    @id @default(cuid())
+  fetchedAt              DateTime                  @default(now())
+  source                 String
+  nepaliDateLabel        String?
+  fineGoldPer10g         Decimal?                  @db.Decimal(12, 2)
+  silverPer10g           Decimal?                  @db.Decimal(12, 2)
+  status                 FetchedRateSnapshotStatus
+  warningReason          String?
+  rawSnippet             String?
+  consumedAt             DateTime?
+  consumedByDailyRateIds String[]                  @default([])
+
+  @@index([fetchedAt(sort: Desc)])
+  @@map("fetched_rate_snapshots")
+}
+
 // ─── ITEM CATEGORY ────────────────────────────────────────────────────────────
 
 model ItemCategory {
@@ -214,6 +275,7 @@ model ItemCategory {
   stockItems    StockItem[]
   jyalaRules    JyalaRule[]
   jertyBrackets JertyBracket[]
+  productionOrderLines ProductionOrderLine[]
 
   @@map("item_categories")
 }
@@ -365,6 +427,7 @@ model PurchaseOrderLine {
 
   // Item details — pre-filled but editable on receipt
   description     String
+  itemName        String   // Display name copied to StockItem on receive
   categoryId      String?
   metalTypeId     String?
   karat           Int?
@@ -439,6 +502,12 @@ model StockItem {
   tradeItemId      String?         @unique
   productionItemId String?         @unique
 
+  // ── Remake back-references ─────────────────────────────────────────────────
+  // V1 limitation: all source items for a multi-piece return point to the first
+  // returned piece as a best-effort pointer. Use ProductionIssueSourceItem for
+  // exact per-piece traceability when one issue yields multiple new items.
+  remadeIntoStockItemId String?
+
   createdAt        DateTime        @default(now())
   updatedAt        DateTime        @updatedAt
 
@@ -450,6 +519,16 @@ model StockItem {
   purchaseOrderLine    PurchaseOrderLine?
   addons               StockItemAddon[]
   transactionLines     TransactionLine[]
+
+  // Self-relation: which item this was remade into (nullable on source items)
+  remadeIntoStockItem  StockItem?         @relation("StockRemake", fields: [remadeIntoStockItemId], references: [id])
+  remadeFromItems      StockItem[]        @relation("StockRemake")
+
+  // Remake source: which production issues consumed this item as input
+  productionIssueSourceItems ProductionIssueSourceItem[]
+
+  // Per-line production: stock created at approve time (1:1)
+  productionOrderLine ProductionOrderLine?
 
   @@index([status])
   @@index([categoryId, metalTypeId])
@@ -528,8 +607,6 @@ model Karigar {
   name         String
   phone        String?
   address      String?
-  // Acceptable wastage % — excess goes to dispute
-  tolerancePct Decimal @db.Decimal(5, 2)
   isActive     Boolean @default(true)
 
   createdAt DateTime @default(now())
@@ -538,6 +615,7 @@ model Karigar {
   productionOrders ProductionOrder[]
   payments         KarigarPayment[]
   disputes         KarigarDispute[]
+  metalBalances    KarigarMetalBalance[]
 
   @@map("karigars")
 }
@@ -549,16 +627,22 @@ model ProductionOrder {
   karigarId    String
   // Override tolerance for this specific order
   tolerancePct Decimal               @db.Decimal(5, 2)
-  status       ProductionOrderStatus @default(OPEN)
-  notes        String?
-  createdAt    DateTime              @default(now())
-  updatedAt    DateTime              @updatedAt
+  // Optional absolute wastage allowance — when set, used instead of tolerancePct
+  toleranceGram Decimal?             @db.Decimal(10, 4)
+  status           ProductionOrderStatus @default(OPEN)
+  notes            String?
+  createdByUserId  String?
+  createdAt        DateTime              @default(now())
+  updatedAt        DateTime              @updatedAt
 
   karigar          Karigar           @relation(fields: [karigarId], references: [id])
+  createdBy        User?             @relation("POCreatedBy", fields: [createdByUserId], references: [id])
   productionIssues ProductionIssue[]
   productionReturns ProductionReturn[]
   payments         KarigarPayment[]
   disputes         KarigarDispute[]
+  lines            ProductionOrderLine[]
+  metalPools       ProductionOrderMetalPool[]
 
   @@index([karigarId])
   @@index([status])
@@ -577,6 +661,9 @@ model ProductionIssue {
   issuedWeightTola Decimal @db.Decimal(10, 4)
   issuedWeightLal  Decimal @db.Decimal(10, 4)
 
+  // Pending metal balance applied to reduce this issue (audit trail)
+  appliedFromBalanceGram Decimal? @db.Decimal(10, 4)
+
   // Rate at time of issue — for valuation
   rateAtIssuePerGram Decimal  @db.Decimal(12, 2)
   issuedAt           DateTime @default(now())
@@ -584,9 +671,39 @@ model ProductionIssue {
   productionOrder  ProductionOrder   @relation(fields: [productionOrderId], references: [id])
   metalType        MetalType         @relation(fields: [metalTypeId], references: [id])
   productionReturns ProductionReturn[]
+  disputes         KarigarDispute[]
+
+  // Per-line production: one dedicated issue per line (1:1)
+  line             ProductionOrderLine?
+
+  // Remake: list of existing StockItems consumed as input alongside raw metal
+  sourceItems      ProductionIssueSourceItem[]
 
   @@index([productionOrderId])
   @@map("production_issues")
+}
+
+// ─── PRODUCTION ISSUE SOURCE ITEM ─────────────────────────────────────────────
+// Join table: which existing StockItems were consumed as input to a production
+// issue (i.e. items being remade). Additive — absent on pure raw-metal issues.
+// weightAtIssueGram snapshots the item's weight at the moment it was issued;
+// the StockItem.grossWeightGram should not change after this, but this record
+// is the audit-safe source of truth regardless.
+
+model ProductionIssueSourceItem {
+  id                String   @id @default(cuid())
+  productionIssueId String
+  stockItemId       String
+
+  // Snapshot of item weight at issue time (gram only — audit-safe scalar)
+  weightAtIssueGram Decimal  @db.Decimal(10, 4)
+
+  productionIssue   ProductionIssue @relation(fields: [productionIssueId], references: [id])
+  stockItem         StockItem       @relation(fields: [stockItemId], references: [id])
+
+  @@index([productionIssueId])
+  @@index([stockItemId])
+  @@map("production_issue_source_items")
 }
 
 // ─── PRODUCTION RETURN ────────────────────────────────────────────────────────
@@ -610,12 +727,16 @@ model ProductionReturn {
   withinTolerance  Boolean  @default(true)
   returnedAt       DateTime @default(now())
 
+  // Convenience lookup for line-based returns (app-maintained, mirrors line.productionReturnId)
+  productionOrderLineId String? @unique
+
   productionOrder  ProductionOrder   @relation(fields: [productionOrderId], references: [id])
   productionIssue  ProductionIssue   @relation(fields: [productionIssueId], references: [id])
   productionItems  ProductionItem[]
+  line             ProductionOrderLine?
 
   @@index([productionOrderId])
-  @@index([productionIssueId])
+  @@unique([productionIssueId])
   @@map("production_returns")
 }
 
@@ -679,6 +800,8 @@ model KarigarDispute {
   id                String        @id @default(cuid())
   karigarId         String
   productionOrderId String
+  productionIssueId String?
+  metalTypeId       String?
 
   // Excess wastage details
   excessWeightGram  Decimal       @db.Decimal(10, 4)
@@ -687,18 +810,104 @@ model KarigarDispute {
 
   // Owner decides how much to deduct
   deductionNpr      Decimal?      @db.Decimal(12, 2)
+  resolutionType    DisputeResolutionType?
   status            DisputeStatus @default(PENDING)
   resolutionNotes   String?
   resolvedAt        DateTime?
+  resolvedByUserId  String?
+
+  // Convenience lookup for line-based disputes (app-maintained, mirrors line.disputeId)
+  productionOrderLineId String? @unique
 
   createdAt         DateTime      @default(now())
 
   karigar         Karigar         @relation(fields: [karigarId], references: [id])
   productionOrder ProductionOrder @relation(fields: [productionOrderId], references: [id])
+  productionIssue ProductionIssue? @relation(fields: [productionIssueId], references: [id])
+  metalType       MetalType?      @relation("DisputeMetal", fields: [metalTypeId], references: [id])
+  resolvedBy      User?           @relation("DisputeResolvedBy", fields: [resolvedByUserId], references: [id])
+  line            ProductionOrderLine?
 
   @@index([karigarId])
   @@index([status])
+  @@index([metalTypeId])
   @@map("karigar_disputes")
+}
+
+// ─── KARIGAR METAL BALANCE ────────────────────────────────────────────────────
+// Positive balanceGram = karigar owes the shop this much metal (unresolved excess
+// wastage minus whatever has already been applied to later issues).
+
+model KarigarMetalBalance {
+  id          String   @id @default(cuid())
+  karigarId   String
+  metalTypeId String
+  balanceGram Decimal  @default(0) @db.Decimal(10, 4)
+  updatedAt   DateTime @updatedAt
+
+  karigar   Karigar   @relation(fields: [karigarId], references: [id])
+  metalType MetalType @relation(fields: [metalTypeId], references: [id])
+
+  @@unique([karigarId, metalTypeId])
+  @@map("karigar_metal_balances")
+}
+
+// ─── PRODUCTION ORDER LINE ────────────────────────────────────────────────────
+// Optional per-item tracking on a production order. Each line owns its own
+// issue → weigh-in → approve lifecycle. 1:1 enforced on issue/return/dispute/stock.
+
+model ProductionOrderLine {
+  id                       String                    @id @default(cuid())
+  productionOrderId        String
+  description              String
+  categoryId               String
+  metalTypeId              String
+  karat                    Int?
+  expectedWeightGram       Decimal                   @db.Decimal(10, 4)
+  plannedIssuedWeightGram  Decimal                   @db.Decimal(10, 4)
+  status                   ProductionOrderLineStatus @default(PENDING)
+
+  productionIssueId        String?                   @unique
+  allowedLossGram          Decimal?                  @db.Decimal(10, 4)
+
+  productionReturnId       String?                   @unique
+  actualWeightGram         Decimal?                  @db.Decimal(10, 4)
+  lineLossGram             Decimal?                  @db.Decimal(10, 4)
+  lineSurplusGram          Decimal?                  @db.Decimal(10, 4)
+  lineDeficitGram          Decimal?                  @db.Decimal(10, 4)
+
+  disputeId                String?                   @unique
+  stockItemId              String?                   @unique
+
+  createdAt                DateTime                  @default(now())
+
+  productionOrder  ProductionOrder    @relation(fields: [productionOrderId], references: [id])
+  category         ItemCategory       @relation(fields: [categoryId], references: [id])
+  metalType        MetalType          @relation(fields: [metalTypeId], references: [id])
+  productionIssue  ProductionIssue?   @relation(fields: [productionIssueId], references: [id])
+  productionReturn ProductionReturn?  @relation(fields: [productionReturnId], references: [id])
+  dispute          KarigarDispute?    @relation(fields: [disputeId], references: [id])
+  stockItem        StockItem?         @relation(fields: [stockItemId], references: [id])
+
+  @@index([productionOrderId])
+  @@index([status])
+  @@map("production_order_lines")
+}
+
+// ─── PRODUCTION ORDER METAL POOL ──────────────────────────────────────────────
+// Per-order surplus pool, scoped by metal type — lines of different metals never share.
+
+model ProductionOrderMetalPool {
+  id                String  @id @default(cuid())
+  productionOrderId String
+  metalTypeId       String
+  pooledSurplusGram Decimal @default(0) @db.Decimal(10, 4)
+
+  productionOrder ProductionOrder @relation(fields: [productionOrderId], references: [id])
+  metalType       MetalType       @relation(fields: [metalTypeId], references: [id])
+
+  @@unique([productionOrderId, metalTypeId])
+  @@map("production_order_metal_pools")
 }
 
 // ─── CUSTOMER ─────────────────────────────────────────────────────────────────
@@ -729,6 +938,9 @@ model Transaction {
   billNumber      String          @unique
   txType          TransactionType
   customerId      String?
+  customerName    String?   // snapshot at time of sale — immutable billing history
+  customerPhone   String?   // display hint (e.g., "****1234") — never raw phone
+  customerAddress String?   // snapshot at time of sale
   createdByUserId String?
   dailyRateId     String?
   relatedTxId     String?

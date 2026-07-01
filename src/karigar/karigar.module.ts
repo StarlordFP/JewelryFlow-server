@@ -3,6 +3,7 @@ import { KarigarService } from './karigar.service';
 import {
   KarigarController,
   ProductionOrderController,
+  ProductionOrderLineController,
   ProductionIssueController,
   ProductionReturnController,
   KarigarPaymentController,
@@ -16,6 +17,7 @@ import { StockModule } from '../stock/stock.module';
   controllers: [
     KarigarController,
     ProductionOrderController,
+    ProductionOrderLineController,
     ProductionIssueController,
     ProductionReturnController,
     KarigarPaymentController,
