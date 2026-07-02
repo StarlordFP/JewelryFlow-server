@@ -1,6 +1,6 @@
 // src/audit/audit.controller.ts
 
-import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Query, Param, UseGuards } from '@nestjs/common';
 import {
   ApiTags,
   ApiBearerAuth,
@@ -8,7 +8,7 @@ import {
   ApiResponse,
 } from '@nestjs/swagger';
 import { AuditService } from './audit.service';
-import { AuditQueryDto } from './dto/audit.dto';
+import { AuditQueryDto, TransactionAuditQueryDto } from './dto/audit.dto';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
 
@@ -42,5 +42,27 @@ export class AuditController {
   })
   getAuditLog(@Query() query: AuditQueryDto) {
     return this.auditService.getAuditLog(query);
+  }
+
+  /**
+   * GET /api/v1/audit/transactions
+   * Roles: OWNER, MANAGER
+   */
+  @Get('transactions')
+  @Roles('OWNER', 'MANAGER')
+  @ApiOperation({ summary: 'Query transaction audit log entries' })
+  getTransactionAuditLogs(@Query() query: TransactionAuditQueryDto) {
+    return this.auditService.getTransactionAuditLogs(query);
+  }
+
+  /**
+   * GET /api/v1/audit/transactions/:billNumber
+   * Roles: OWNER, MANAGER
+   */
+  @Get('transactions/:billNumber')
+  @Roles('OWNER', 'MANAGER')
+  @ApiOperation({ summary: 'Chronological audit history for one bill' })
+  getTransactionAuditByBillNumber(@Param('billNumber') billNumber: string) {
+    return this.auditService.getTransactionAuditByBillNumber(billNumber);
   }
 }

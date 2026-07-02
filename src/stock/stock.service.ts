@@ -7,6 +7,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { StockSkuService } from './stock-sku.service';
 import { WeightUtil } from '../common/utils/weight.util';
+import { isGoldMetal } from '../common/utils/metal.util';
 import { Decimal } from '@prisma/client/runtime/library';
 import {
   CreateStockItemDto,
@@ -16,7 +17,9 @@ import {
   StockQueryDto,
   JyalaBreakdownDto,
   UpdateCategoryDto,
+  BulkCreateStockDto,
 } from './dto/stock.dto';
+import { deriveCategoryShortCode } from './sku-suffix.util';
 
 // ─── PRICING RESULT ───────────────────────────────────────────────────────────
 
@@ -148,9 +151,12 @@ export class StockService {
       if (dto.origin.tradeItemId) {
         throw new BadRequestException('tradeItemId may only be set when origin.type=TRADE');
       }
-    } else {
+    } else if (dto.origin.type === 'DIRECT' || dto.origin.type === 'PURCHASED' || dto.origin.type === 'REMAKE') {
       if (dto.origin.tradeItemId || dto.origin.productionItemId) {
         throw new BadRequestException('tradeItemId or productionItemId may only be set when origin.type is TRADE or KARIGAR');
+      }
+      if (dto.origin.type === 'DIRECT' && !metalTypeId) {
+        throw new BadRequestException('metalTypeId is required when origin.type=DIRECT');
       }
     }
 
@@ -176,79 +182,157 @@ export class StockService {
     const jyala   = this.sumJyala(dto.jyalaBreakdown);
     const totalJyalaNpr = jyala.total;
 
-    // ── Generate SKU ─────────────────────────────────────────────────────────
-    const sku = await this.skuService.generateSku(dto.origin.type);
+    // ── Create stock item + SKU in one transaction ─────────────────────────
+    const stockItem = await this.prisma.$transaction(async (tx) => {
+      let sku: string;
+      if (dto.origin.type === 'DIRECT') {
+        sku = await this.skuService.generateCategoryKaratSku(
+          dto.categoryId,
+          metalTypeId!,
+          tx,
+        );
+      } else {
+        sku = await this.skuService.generateSku(
+          dto.origin.type as 'TRADE' | 'KARIGAR' | 'PURCHASED' | 'REMAKE',
+          tx,
+        );
+      }
 
-    // Snapshot today's rate so profit report can resolve cost for manual stock entry
-    let entryRateId: string | null = null;
-    if (metalTypeId) {
-      const entryRate = await this.prisma.dailyRate.findFirst({
-        where:   { metalTypeId, isCurrent: true },
-        orderBy: { effectiveDate: 'desc' },
+      let entryRateId: string | null = null;
+      if (metalTypeId) {
+        const entryRate = await tx.dailyRate.findFirst({
+          where:   { metalTypeId, isCurrent: true },
+          orderBy: { effectiveDate: 'desc' },
+        });
+        entryRateId = entryRate?.id ?? null;
+      }
+
+      return tx.stockItem.create({
+        data: {
+          sku,
+          name:            dto.name?.trim() || null,
+          origin:          dto.origin.type,
+          categoryId:      dto.categoryId,
+          metalTypeId,
+          karat:           isGoldMetal(resolvedMetal) ? dto.karat ?? null : null,
+          entryRateId,
+          tradeItemId:     dto.origin.tradeItemId,
+          productionItemId: dto.origin.productionItemId,
+
+          grossWeightGram: grossW.gram,
+          grossWeightTola: grossW.tola,
+          grossWeightLal:  grossW.lal,
+
+          jertyGram:       finalJertyW.gram,
+          jertyTola:       finalJertyW.tola,
+          jertyLal:        finalJertyW.lal,
+
+          makingChargeNpr: jyala.making,
+          stoneChargeNpr:  jyala.stone,
+          motiChargeNpr:   jyala.moti,
+          malaChargeNpr:   jyala.mala,
+          otherChargeNpr:  jyala.other,
+          totalJyalaNpr,
+
+          applyLuxuryTax:  dto.applyLuxuryTax ?? false,
+          applyVat:        dto.applyVat ?? false,
+
+          photoUrl:        dto.photoUrl,
+          notes:           dto.notes,
+          status:          'IN_STOCK',
+
+          addons: dto.addons?.length
+            ? {
+                create: dto.addons.map((a) => ({
+                  addonTypeId:  a.addonTypeId,
+                  quantity:     a.quantity,
+                  valuationNpr: a.valuationNpr,
+                  notes:        a.notes,
+                })),
+              }
+            : undefined,
+        },
+        include: {
+          category:  true,
+          metalType: true,
+          addons:    { include: { addonType: true } },
+          tradeItem: true,
+        },
       });
-      entryRateId = entryRate?.id ?? null;
-    }
-
-    // ── Create stock item ────────────────────────────────────────────────────
-    const stockItem = await this.prisma.stockItem.create({
-      data: {
-        sku,
-        name:            dto.name,
-        origin:          dto.origin.type,
-        categoryId:      dto.categoryId,
-        metalTypeId,
-        karat:           this.isGoldMetal(resolvedMetal) ? dto.karat ?? null : null,
-        entryRateId,
-        tradeItemId:     dto.origin.tradeItemId,
-        productionItemId: dto.origin.productionItemId,
-
-        // Gross weight
-        grossWeightGram: grossW.gram,
-        grossWeightTola: grossW.tola,
-        grossWeightLal:  grossW.lal,
-
-        // Jerty weight
-        jertyGram:       finalJertyW.gram,
-        jertyTola:       finalJertyW.tola,
-        jertyLal:        finalJertyW.lal,
-
-        // Jyala breakdown
-        makingChargeNpr: jyala.making,
-        stoneChargeNpr:  jyala.stone,
-        motiChargeNpr:   jyala.moti,
-        malaChargeNpr:   jyala.mala,
-        otherChargeNpr:  jyala.other,
-        totalJyalaNpr,
-
-        // Tax toggles
-        applyLuxuryTax:  dto.applyLuxuryTax ?? false,
-        applyVat:        dto.applyVat ?? false,
-
-        photoUrl:        dto.photoUrl,
-        notes:           dto.notes,
-        status:          'IN_STOCK',
-
-        // Addons
-        addons: dto.addons?.length
-          ? {
-              create: dto.addons.map((a) => ({
-                addonTypeId:  a.addonTypeId,
-                quantity:     a.quantity,
-                valuationNpr: a.valuationNpr,
-                notes:        a.notes,
-              })),
-            }
-          : undefined,
-      },
-      include: {
-        category:  true,
-        metalType: true,
-        addons:    { include: { addonType: true } },
-        tradeItem: true,
-      },
     });
 
     return await this.formatStockResponse(stockItem);
+  }
+
+  async bulkCreateStock(dto: BulkCreateStockDto) {
+    if (dto.items.length < 1 || dto.items.length > 100) {
+      throw new BadRequestException('items must contain between 1 and 100 entries');
+    }
+
+    const category = await this.prisma.itemCategory.findUnique({
+      where: { id: dto.categoryId },
+    });
+    if (!category || !category.isActive) {
+      throw new NotFoundException(`Category ${dto.categoryId} not found or inactive`);
+    }
+
+    const metalType = await this.prisma.metalType.findUnique({
+      where: { id: dto.metalTypeId },
+    });
+    if (!metalType || !metalType.isActive) {
+      throw new NotFoundException(`MetalType ${dto.metalTypeId} not found or inactive`);
+    }
+
+    const isGold = isGoldMetal(metalType);
+
+    const created = await this.prisma.$transaction(async (tx) => {
+      const entryRate = await tx.dailyRate.findFirst({
+        where:   { metalTypeId: dto.metalTypeId, isCurrent: true },
+        orderBy: { effectiveDate: 'desc' },
+      });
+      const entryRateId = entryRate?.id ?? null;
+
+      const rows = [];
+      for (const item of dto.items) {
+        const grossW = WeightUtil.from(item.grossWeight.value, item.grossWeight.unit);
+        const sku = await this.skuService.generateCategoryKaratSku(
+          dto.categoryId,
+          dto.metalTypeId,
+          tx,
+        );
+
+        const row = await tx.stockItem.create({
+          data: {
+            sku,
+            name:            item.name?.trim() || null,
+            origin:          'DIRECT',
+            categoryId:      dto.categoryId,
+            metalTypeId:     dto.metalTypeId,
+            karat:           isGold ? item.karat ?? null : null,
+            entryRateId,
+            grossWeightGram: grossW.gram,
+            grossWeightTola: grossW.tola,
+            grossWeightLal:  grossW.lal,
+            status:          'IN_STOCK',
+            notes:           item.notes,
+          },
+          include: {
+            category:  true,
+            metalType: true,
+          },
+        });
+        rows.push(row);
+      }
+      return rows;
+    });
+
+    return {
+      items: await Promise.all(created.map((row) => this.formatStockResponse(row))),
+    };
+  }
+
+  previewSku(categoryId: string, metalTypeId: string) {
+    return this.skuService.previewCategoryKaratSku(categoryId, metalTypeId);
   }
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -467,7 +551,7 @@ export class StockService {
       const metal = await this.prisma.metalType.findUnique({
         where: { id: effectiveMetalId },
       });
-      if (!this.isGoldMetal(metal)) {
+      if (!isGoldMetal(metal)) {
         data.karat = null;
       }
     } else if (data.metalTypeId === null) {
@@ -688,8 +772,7 @@ export class StockService {
     // ── Luxury tax — read active rule from DB, not hardcoded ─────────────────
     let luxuryTaxNpr = new Decimal(0);
     if (resolvedApplyLuxuryTax) {
-      const isGold = item.metalType?.name?.toLowerCase().includes('gold') ?? false;
-      if (isGold) {
+      if (isGoldMetal(item.metalType)) {
         const luxuryRule = await client.luxuryTaxRule.findFirst({
           where:   { isActive: true, appliesTo: 'GOLD' },
           orderBy: { effectiveDate: 'desc' },   // most recent active rule wins
@@ -827,10 +910,6 @@ export class StockService {
   // ════════════════════════════════════════════════════════════════════════════
   //  HELPERS
   // ════════════════════════════════════════════════════════════════════════════
-
-  private isGoldMetal(metal: { name: string } | null | undefined): boolean {
-    return metal?.name?.toLowerCase().includes('gold') ?? false;
-  }
 
   /** Sum jyala breakdown fields, return individual values + total */
   private sumJyala(breakdown?: JyalaBreakdownDto) {
@@ -978,8 +1057,7 @@ export class StockService {
 
         // Calculate luxury tax
         if (item.applyLuxuryTax) {
-          const isGold = item.metalType?.name?.toLowerCase().includes('gold') ?? false;
-          if (isGold) {
+          if (isGoldMetal(item.metalType)) {
             const luxuryRule = await this.prisma.luxuryTaxRule.findFirst({
               where: { isActive: true, appliesTo: 'GOLD' },
               orderBy: { effectiveDate: 'desc' },
@@ -1060,54 +1138,142 @@ export class StockService {
   }
 
   async getCategories() {
-  return this.prisma.itemCategory.findMany({
-    where:   { isActive: true },   // ← add this filter — don't show deactivated
-    orderBy: { name: 'asc' },
-  });
-}
-
-async createCategory(name: string) {
-  // Check for duplicate name
-  const existing = await this.prisma.itemCategory.findUnique({
-    where: { name },
-  });
-  if (existing) {
-    // If it was deactivated before, reactivate it
-    if (!existing.isActive) {
-      return this.prisma.itemCategory.update({
-        where: { name },
-        data:  { isActive: true },
-      });
-    }
-    throw new ConflictException(`Category "${name}" already exists`);
-  }
-
-  return this.prisma.itemCategory.create({
-    data: { name },
-  });
-}
-
-async updateCategory(id: string, dto: UpdateCategoryDto) {
-  const category = await this.prisma.itemCategory.findUnique({
-    where: { id },
-  });
-  if (!category) throw new NotFoundException(`Category ${id} not found`);
-
-  // If renaming, check new name doesn't conflict
-  if (dto.name && dto.name !== category.name) {
-    const conflict = await this.prisma.itemCategory.findUnique({
-      where: { name: dto.name },
+    const rows = await this.prisma.itemCategory.findMany({
+      orderBy: { name: 'asc' },
+      include: {
+        _count: { select: { stockItems: true } },
+        karatSequences: { where: { lastSeq: { gt: 0 } }, select: { id: true }, take: 1 },
+      },
     });
-    if (conflict) {
-      throw new ConflictException(`Category "${dto.name}" already exists`);
+
+    return rows.map((c) => ({
+      id:               c.id,
+      name:             c.name,
+      shortCode:        c.shortCode,
+      isProtected:      c.isProtected,
+      isActive:         c.isActive,
+      itemCount:        c._count.stockItems,
+      skuSequenceUsed:  c.karatSequences.length > 0,
+    }));
+  }
+
+  private async resolveUniqueShortCode(
+    proposed: string,
+    excludeId?: string,
+  ): Promise<string> {
+    const normalized = proposed.toUpperCase().slice(0, 4);
+    let candidate = normalized;
+    let n = 2;
+
+    while (true) {
+      const conflict = await this.prisma.itemCategory.findFirst({
+        where: {
+          shortCode: candidate,
+          ...(excludeId ? { NOT: { id: excludeId } } : {}),
+        },
+      });
+      if (!conflict) return candidate;
+      candidate = `${normalized.slice(0, 2)}${n}`;
+      n += 1;
     }
   }
 
-  return this.prisma.itemCategory.update({
-    where: { id },
-    data:  dto,
-  });
-}
+  async createCategory(name: string, shortCode?: string, createdByUserId?: string) {
+    const existing = await this.prisma.itemCategory.findUnique({
+      where: { name },
+    });
+    if (existing) {
+      if (!existing.isActive) {
+        return this.prisma.itemCategory.update({
+          where: { name },
+          data:  { isActive: true },
+        });
+      }
+      throw new ConflictException(`Category "${name}" already exists`);
+    }
+
+    const code = await this.resolveUniqueShortCode(
+      shortCode?.toUpperCase() ?? deriveCategoryShortCode(name),
+    );
+
+    return this.prisma.itemCategory.create({
+      data: {
+        name,
+        shortCode: code,
+        isProtected: false,
+        createdByUserId: createdByUserId ?? null,
+      },
+    });
+  }
+
+  async updateCategory(id: string, dto: UpdateCategoryDto) {
+    const category = await this.prisma.itemCategory.findUnique({
+      where: { id },
+    });
+    if (!category) throw new NotFoundException(`Category ${id} not found`);
+
+    if (dto.name && dto.name !== category.name) {
+      const conflict = await this.prisma.itemCategory.findUnique({
+        where: { name: dto.name },
+      });
+      if (conflict) {
+        throw new ConflictException(`Category "${dto.name}" already exists`);
+      }
+    }
+
+    if (dto.shortCode && dto.shortCode.toUpperCase() !== category.shortCode) {
+      const seqUsed = await this.prisma.categoryKaratSequence.findFirst({
+        where: { categoryId: id, lastSeq: { gt: 0 } },
+      });
+      if (seqUsed) {
+        throw new ConflictException(
+          'Items already have SKUs using this code — shortCode cannot be changed after stock has been added.',
+        );
+      }
+
+      const conflict = await this.prisma.itemCategory.findFirst({
+        where: { shortCode: dto.shortCode.toUpperCase(), NOT: { id } },
+      });
+      if (conflict) {
+        throw new ConflictException(`shortCode "${dto.shortCode}" is already in use`);
+      }
+    }
+
+    const data: { name?: string; shortCode?: string; isActive?: boolean } = {};
+    if (dto.name !== undefined) data.name = dto.name;
+    if (dto.shortCode !== undefined) data.shortCode = dto.shortCode.toUpperCase();
+    if (dto.isActive !== undefined) data.isActive = dto.isActive;
+
+    return this.prisma.itemCategory.update({
+      where: { id },
+      data,
+    });
+  }
+
+  async deleteCategory(id: string) {
+    const category = await this.prisma.itemCategory.findUnique({
+      where: { id },
+    });
+    if (!category) throw new NotFoundException(`Category ${id} not found`);
+
+    if (category.isProtected) {
+      throw new ConflictException(
+        `Category "${category.name}" is protected and cannot be deleted`,
+      );
+    }
+
+    const stockCount = await this.prisma.stockItem.count({
+      where: { categoryId: id },
+    });
+    if (stockCount > 0) {
+      throw new ConflictException(
+        `Cannot delete category "${category.name}" — ${stockCount} stock item(s) reference it`,
+      );
+    }
+
+    await this.prisma.categoryKaratSequence.deleteMany({ where: { categoryId: id } });
+    return this.prisma.itemCategory.delete({ where: { id } });
+  }
 
 async deactivateCategory(id: string) {
   const category = await this.prisma.itemCategory.findUnique({

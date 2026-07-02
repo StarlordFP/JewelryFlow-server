@@ -4,6 +4,8 @@ import {
   IsBoolean,
   IsInt,
   IsArray,
+  ArrayMinSize,
+  ArrayMaxSize,
   IsIn,
   IsPositive,
   IsNumber,
@@ -90,10 +92,10 @@ export class JyalaBreakdownDto {
 
 export class StockItemOriginDto {
   /** Origin type for this stock item */
-  @ApiProperty({ description: 'Origin type for this stock item', enum: ['PURCHASED', 'KARIGAR', 'TRADE', 'REMAKE'], example: 'PURCHASED' })
+  @ApiProperty({ description: 'Origin type for this stock item', enum: ['DIRECT', 'PURCHASED', 'KARIGAR', 'TRADE', 'REMAKE'], example: 'DIRECT' })
   @IsString()
-  @IsIn(['PURCHASED', 'KARIGAR', 'TRADE', 'REMAKE'])
-  type!: 'PURCHASED' | 'KARIGAR' | 'TRADE' | 'REMAKE';
+  @IsIn(['DIRECT', 'PURCHASED', 'KARIGAR', 'TRADE', 'REMAKE'])
+  type!: 'DIRECT' | 'PURCHASED' | 'KARIGAR' | 'TRADE' | 'REMAKE';
 
   /** Trade item ID when origin=TRADE */
   @ApiPropertyOptional({ description: 'Trade item ID when origin=TRADE', example: 'clp789def' })
@@ -448,11 +450,11 @@ export class StockQueryDto {
   metalTypeId?: string;
 
   /** Filter by origin */
-  @ApiPropertyOptional({ description: 'Filter by origin', enum: ['PURCHASED', 'KARIGAR', 'TRADE'] })
+  @ApiPropertyOptional({ description: 'Filter by origin', enum: ['DIRECT', 'PURCHASED', 'KARIGAR', 'TRADE', 'REMAKE'] })
   @IsOptional()
   @IsString()
-  @IsIn(['PURCHASED', 'KARIGAR', 'TRADE'])
-  origin?: 'PURCHASED' | 'KARIGAR' | 'TRADE';
+  @IsIn(['DIRECT', 'PURCHASED', 'KARIGAR', 'TRADE', 'REMAKE'])
+  origin?: 'DIRECT' | 'PURCHASED' | 'KARIGAR' | 'TRADE' | 'REMAKE';
 
   /** Filter by status */
   @ApiPropertyOptional({ description: 'Filter by status', enum: ['IN_STOCK', 'RESERVED', 'SOLD', 'RETURNED', 'SCRAPPED', 'UNDER_DISPUTE', 'IN_REMAKE', 'REMADE'] })
@@ -510,6 +512,13 @@ export class CreateCategoryDto {
   @MinLength(2)
   @MaxLength(100)
   name!: string;
+
+  @ApiPropertyOptional({ description: 'Short code (2-4 uppercase). Auto-derived if omitted.', example: 'RNG' })
+  @IsOptional()
+  @IsString()
+  @MinLength(2)
+  @MaxLength(4)
+  shortCode?: string;
 }
 
 export class UpdateCategoryDto {
@@ -520,8 +529,60 @@ export class UpdateCategoryDto {
   @MaxLength(100)
   name?: string;
 
+  @ApiPropertyOptional({ description: 'Short code (2-4 uppercase)', example: 'RNG' })
+  @IsOptional()
+  @IsString()
+  @MinLength(2)
+  @MaxLength(4)
+  shortCode?: string;
+
   @ApiPropertyOptional({ description: 'Active status', example: true })
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+}
+
+// ─── BULK STOCK ENTRY ─────────────────────────────────────────────────────────
+
+export class BulkStockItemDto {
+  @ApiProperty({ description: 'Gross weight', type: WeightInputDto })
+  @ValidateNested()
+  @Type(() => WeightInputDto)
+  grossWeight!: WeightInputDto;
+
+  @ApiPropertyOptional({ description: 'Optional item name' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(200)
+  name?: string;
+
+  @ApiPropertyOptional({ description: 'Karat for gold items', enum: [24, 22, 18, 14] })
+  @IsOptional()
+  @IsInt()
+  @IsIn([24, 22, 18, 14])
+  karat?: number;
+
+  @ApiPropertyOptional({ description: 'Notes' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(500)
+  notes?: string;
+}
+
+export class BulkCreateStockDto {
+  @ApiProperty({ description: 'Category ID for all items in batch' })
+  @IsString()
+  categoryId!: string;
+
+  @ApiProperty({ description: 'Metal type ID for all items in batch' })
+  @IsString()
+  metalTypeId!: string;
+
+  @ApiProperty({ description: 'Items to create (1-100)', type: [BulkStockItemDto] })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(100)
+  @ValidateNested({ each: true })
+  @Type(() => BulkStockItemDto)
+  items!: BulkStockItemDto[];
 }

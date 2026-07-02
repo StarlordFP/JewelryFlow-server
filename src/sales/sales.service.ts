@@ -3,6 +3,7 @@ import {
   NotFoundException,
   BadRequestException,
   ConflictException,
+  Logger,
 } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { StockService } from '../stock/stock.service';
@@ -12,6 +13,8 @@ import { WeightUtil, WeightValue } from '../common/utils/weight.util';
 import { GRAMS_PER_TOLA } from '../common/constants/weight.constants';
 import { Decimal } from '@prisma/client/runtime/library';
 import { randomBytes, createHash } from 'crypto';
+import { writeTransactionAudit } from '../audit/write-transaction-audit';
+import { applyBillRounding, resolveRoundingUnit } from '../common/utils/bill-rounding.util';
 import {
   CreateSellDto,
   CreateReturnDto,
@@ -26,6 +29,8 @@ const RETURN_WINDOW_DAYS = 7;
 
 @Injectable()
 export class SalesService {
+  private readonly logger = new Logger(SalesService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly stockService: StockService,
@@ -60,6 +65,12 @@ export class SalesService {
     } = dto;
 
     return this.prisma.$transaction(async (tx) => {
+      const actor = await tx.user.findUnique({
+        where: { id: userId },
+        select: { name: true },
+      });
+      const actorName = actor?.name;
+
       let resolvedCustomerId = customerId;
 
       if (!resolvedCustomerId && newCustomerName) {
@@ -274,7 +285,12 @@ export class SalesService {
         });
       }
 
-      const grandTotal = subTotal;
+      const discountNpr = new Decimal(0);
+      const preRoundingPayable = subTotal.minus(discountNpr);
+      const roundingUnit = resolveRoundingUnit(stockItems.map((s) => s.metalType));
+      const rounding = applyBillRounding(preRoundingPayable, roundingUnit);
+      const grandTotal = rounding.roundedTotal;
+      const roundingNpr = rounding.roundingNpr;
       const paidAmount = new Decimal(payment.amountNpr);
 
       if (paidAmount.greaterThan(grandTotal.mul(2))) {
@@ -309,6 +325,8 @@ export class SalesService {
           createdByUserId: userId,
           dailyRateId: primaryRate?.id ?? null,
           subTotalNpr: subTotal,
+          discountNpr,
+          roundingNpr,
           grandTotalNpr: grandTotal,
           paidAmountNpr: paidAmount,
           balanceNpr: balance,
@@ -327,6 +345,38 @@ export class SalesService {
         },
         include: this.fullTxInclude(),
       });
+
+      await writeTransactionAudit(tx, this.logger, {
+        entityId: txn.id,
+        billNumber: billNum,
+        action: 'CREATED',
+        actorId: userId,
+        actorName,
+        after: {
+          subTotalNpr: subTotal.toFixed(2),
+          discountNpr: discountNpr.toFixed(2),
+          roundingNpr: roundingNpr.toFixed(2),
+          grandTotalNpr: grandTotal.toFixed(2),
+          txType: 'SELL',
+          itemCount: lineData.length,
+        },
+      });
+
+      if (roundingNpr.gt(0)) {
+        await writeTransactionAudit(tx, this.logger, {
+          entityId: txn.id,
+          billNumber: billNum,
+          action: 'ROUNDING_APPLIED',
+          actorId: userId,
+          actorName,
+          after: {
+            unit: roundingUnit,
+            preRoundingTotal: preRoundingPayable.toFixed(2),
+            roundingNpr: roundingNpr.toFixed(2),
+            roundedTotal: grandTotal.toFixed(2),
+          },
+        });
+      }
 
       // (Stock items were already atomically marked SOLD at step 5)
 
@@ -378,6 +428,12 @@ export class SalesService {
     const returnedStockItemIds = items.map((i) => i.stockItemId);
 
     return this.prisma.$transaction(async (tx) => {
+      const actor = await tx.user.findUnique({
+        where: { id: userId },
+        select: { name: true },
+      });
+      const actorName = actor?.name;
+
       const freshOriginal = await tx.transaction.findUnique({
         where: { id: originalTxId },
         include: { lines: true },
@@ -479,6 +535,16 @@ export class SalesService {
         );
       }
 
+      await writeTransactionAudit(tx, this.logger, {
+        entityId: txn.id,
+        billNumber: billNum,
+        action: 'RETURNED',
+        actorId: userId,
+        actorName,
+        after: { refundNpr: refundTotal.toFixed(2) },
+        metadata: { relatedBillNumber: freshOriginal.billNumber },
+      });
+
       return this.formatTxResponse(txn);
     });
   }
@@ -502,6 +568,21 @@ export class SalesService {
     const exchangeGroupId = `EXG-${randomBytes(8).toString('hex')}`;
 
     return this.prisma.$transaction(async (tx) => {
+      const actor = await tx.user.findUnique({
+        where: { id: userId },
+        select: { name: true },
+      });
+      const actorName = actor?.name;
+
+      let relatedBillNumber: string | null = null;
+      if (relatedTxId) {
+        const related = await tx.transaction.findUnique({
+          where: { id: relatedTxId },
+          select: { billNumber: true },
+        });
+        relatedBillNumber = related?.billNumber ?? null;
+      }
+
       let inTotal = new Decimal(0);
       let outTotal = new Decimal(0);
       const inLineData: any[] = [];
@@ -686,6 +767,16 @@ export class SalesService {
         include: this.fullTxInclude(),
       });
 
+      await writeTransactionAudit(tx, this.logger, {
+        entityId: txn.id,
+        billNumber: billNum,
+        action: 'EXCHANGED',
+        actorId: userId,
+        actorName,
+        after: { netNpr: cashDiff.toFixed(2) },
+        metadata: { relatedBillNumber },
+      });
+
       return {
         ...this.formatTxResponse(txn),
         exchangeSummary: {
@@ -709,6 +800,12 @@ export class SalesService {
     const totalNpr = weightVal.gram * buyRatePerGram;
 
     return this.prisma.$transaction(async (tx) => {
+      const [actor, metalType] = await Promise.all([
+        tx.user.findUnique({ where: { id: userId }, select: { name: true } }),
+        tx.metalType.findUnique({ where: { id: metalTypeId }, select: { name: true } }),
+      ]);
+      const actorName = actor?.name;
+
       const billNum = await this.billNumber.generate(tx);
       const paidAmount = new Decimal(payment.amountNpr);
       const custSnapshot = await this.resolveCustomerSnapshot(tx, customerId);
@@ -764,6 +861,19 @@ export class SalesService {
         include: this.fullTxInclude(),
       });
 
+      await writeTransactionAudit(tx, this.logger, {
+        entityId: txn.id,
+        billNumber: billNum,
+        action: 'BUYBACK',
+        actorId: userId,
+        actorName,
+        after: {
+          metalType: metalType?.name ?? metalTypeId,
+          weightGram: weightVal.gram,
+          paidNpr: paidAmount.toFixed(2),
+        },
+      });
+
       return {
         ...this.formatTxResponse(txn),
         createdStockItem: this.formatCreatedStockItem(stockItem),
@@ -782,6 +892,12 @@ export class SalesService {
     const totalNpr = weightVal.gram * buyRatePerGram;
 
     return this.prisma.$transaction(async (tx) => {
+      const [actor, metalType] = await Promise.all([
+        tx.user.findUnique({ where: { id: userId }, select: { name: true } }),
+        tx.metalType.findUnique({ where: { id: metalTypeId }, select: { name: true } }),
+      ]);
+      const actorName = actor?.name;
+
       const billNum = await this.billNumber.generate(tx);
       const paidAmount = new Decimal(payment.amountNpr);
       const custSnapshot = await this.resolveCustomerSnapshot(tx, customerId);
@@ -835,6 +951,19 @@ export class SalesService {
         include: this.fullTxInclude(),
       });
 
+      await writeTransactionAudit(tx, this.logger, {
+        entityId: txn.id,
+        billNumber: billNum,
+        action: 'OLD_GOLD',
+        actorId: userId,
+        actorName,
+        after: {
+          metalType: metalType?.name ?? metalTypeId,
+          weightGram: weightVal.gram,
+          paidNpr: paidAmount.toFixed(2),
+        },
+      });
+
       return {
         ...this.formatTxResponse(txn),
         createdStockItem: this.formatCreatedStockItem(stockItem),
@@ -850,8 +979,14 @@ export class SalesService {
    * Record an additional payment against an existing transaction.
    * Updates paidAmountNpr and balanceNpr on the transaction.
    */
-  async addPayment(txId: string, dto: AddPaymentDto) {
+  async addPayment(userId: string, txId: string, dto: AddPaymentDto) {
     return this.prisma.$transaction(async (tx) => {
+      const actor = await tx.user.findUnique({
+        where: { id: userId },
+        select: { name: true },
+      });
+      const actorName = actor?.name;
+
       // Re-read inside transaction so concurrent payments
       // see each other's writes before checking balance
       const txn = await tx.transaction.findUnique({ where: { id: txId } });
@@ -880,11 +1015,26 @@ export class SalesService {
         },
       });
 
-      return tx.transaction.update({
+      const updated = await tx.transaction.update({
         where: { id: txId },
         data: { paidAmountNpr: newPaid, balanceNpr: newBalance },
         include: this.fullTxInclude(),
       });
+
+      await writeTransactionAudit(tx, this.logger, {
+        entityId: txId,
+        billNumber: txn.billNumber,
+        action: 'PAYMENT_ADDED',
+        actorId: userId,
+        actorName,
+        after: {
+          amountNpr: dto.payment.amountNpr,
+          method: dto.payment.method,
+          newBalance: newBalance.toFixed(2),
+        },
+      });
+
+      return updated;
     });
   }
 
@@ -1258,6 +1408,7 @@ export class SalesService {
         lines: ownerLines,
         subTotal: txn.subTotalNpr,
         grandTotal: txn.grandTotalNpr,
+        rounding: txn.roundingNpr,
         paid: txn.paidAmountNpr,
         balance: txn.balanceNpr,
         payments: txn.payments,
@@ -1271,6 +1422,7 @@ export class SalesService {
         lines: customerLines,
         subTotal: txn.subTotalNpr,
         discount: txn.discountNpr,
+        rounding: txn.roundingNpr,
         tax: billTaxTotal.toFixed(2),
         grandTotal: txn.grandTotalNpr,
         paid: txn.paidAmountNpr,

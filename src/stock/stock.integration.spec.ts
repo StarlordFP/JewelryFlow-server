@@ -68,9 +68,8 @@ describe('Stock Integration Tests (e2e)', () => {
   });
 
   afterAll(async () => {
-    // Clean up stock items created in tests
     await prisma.stockItem.deleteMany({
-      where: { sku: { startsWith: 'PUR-' } },
+      where: { OR: [{ origin: 'DIRECT' }, { sku: { startsWith: 'PUR-' } }] },
     });
     await app.close();
   });
@@ -91,8 +90,9 @@ describe('Stock Integration Tests (e2e)', () => {
       expect(res.body.data.length).toBeGreaterThan(0);
 
       // Get first active category for stock item creation
-      const activeCategory = res.body.data.find((c: any) => c.isActive);
+      const activeCategory = res.body.data.find((c: any) => c.isActive && c.shortCode);
       expect(activeCategory).toBeDefined();
+      expect(activeCategory.shortCode).toBeTruthy();
       categoryId = activeCategory.id;
     });
 
@@ -158,14 +158,19 @@ describe('Stock Integration Tests (e2e)', () => {
       expect(Number(res.body.data.grandTotalNpr)).toBeCloseTo(expectedGrandTotal, -1);
     });
 
-    it('POST /api/v1/stock → should create stock item with PURCHASED origin', async () => {
+    it('POST /api/v1/stock → should create stock item with DIRECT origin and category-karat SKU', async () => {
+      const catRes = await request(app.getHttpServer())
+        .get('/api/v1/stock/categories')
+        .set('Authorization', `Bearer ${authToken}`);
+      const chainCat = catRes.body.data.find((c: any) => c.shortCode === 'CHN');
+
       const res = await request(app.getHttpServer())
         .post('/api/v1/stock')
         .set('Authorization', `Bearer ${authToken}`)
         .send({
-          origin: { type: 'PURCHASED' },
+          origin: { type: 'DIRECT' },
           name: 'Test Gold Ring',
-          categoryId,
+          categoryId: chainCat.id,
           metalTypeId: goldMetalTypeId,
           karat: 22,
           grossWeight: { value: 10, unit: 'gram' },
@@ -185,11 +190,11 @@ describe('Stock Integration Tests (e2e)', () => {
       expect(res.body).toMatchObject({ success: true });
       expect(res.body.data).toMatchObject({
         id: expect.any(String),
-        sku: expect.stringMatching(/^PUR-\d+/),
+        sku: expect.stringMatching(/^CHN-\d{4}-\d{2}K$/),
         status: 'IN_STOCK',
-        origin: 'PURCHASED',
+        origin: 'DIRECT',
         name: 'Test Gold Ring',
-        categoryId,
+        categoryId: chainCat.id,
         metalTypeId: goldMetalTypeId,
         karat: 22,
       });
@@ -204,9 +209,10 @@ describe('Stock Integration Tests (e2e)', () => {
       expect(res.body.data.stoneChargeNpr).toBeDefined();
 
       stockItemId = res.body.data.id;
+      categoryId = chainCat.id;
     });
 
-    it('POST /api/v1/stock → should generate SKU matching origin type', async () => {
+    it('POST /api/v1/stock → PURCHASED origin still uses PUR- SKU', async () => {
       const res = await request(app.getHttpServer())
         .post('/api/v1/stock')
         .set('Authorization', `Bearer ${authToken}`)
@@ -220,7 +226,26 @@ describe('Stock Integration Tests (e2e)', () => {
         })
         .expect(201);
 
-      expect(res.body.data.sku).toMatch(/^PUR-\d+/);
+      expect(res.body.data.sku).toMatch(/^PUR-\d{8}-\d{4}$/);
+      await prisma.stockItem.delete({ where: { id: res.body.data.id } });
+    });
+
+    it('POST /api/v1/stock → DIRECT generates category-karat SKU', async () => {
+      const res = await request(app.getHttpServer())
+        .post('/api/v1/stock')
+        .set('Authorization', `Bearer ${authToken}`)
+        .send({
+          origin: { type: 'DIRECT' },
+          categoryId,
+          metalTypeId: goldMetalTypeId,
+          grossWeight: { value: 5, unit: 'gram' },
+          applyLuxuryTax: false,
+          applyVat: false,
+        })
+        .expect(201);
+
+      expect(res.body.data.sku).toMatch(/^CHN-\d{4}-\d{2}K$/);
+      await prisma.stockItem.delete({ where: { id: res.body.data.id } });
     });
 
     it('GET /api/v1/stock → should list stock items', async () => {
@@ -254,9 +279,9 @@ describe('Stock Integration Tests (e2e)', () => {
       expect(res.body).toMatchObject({ success: true });
       expect(res.body.data).toMatchObject({
         id: stockItemId,
-        sku: expect.stringMatching(/^PUR-\d+/),
+        sku: expect.stringMatching(/^CHN-\d{4}-\d{2}K$/),
         status: 'IN_STOCK',
-        origin: 'PURCHASED',
+        origin: 'DIRECT',
         categoryId,
         metalTypeId: goldMetalTypeId,
         grossWeightGram: expect.any(Number),

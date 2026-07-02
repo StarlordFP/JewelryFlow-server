@@ -2,7 +2,7 @@
 
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { AuditQueryDto } from './dto/audit.dto';
+import { AuditQueryDto, TransactionAuditQueryDto } from './dto/audit.dto';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -239,5 +239,45 @@ export class AuditService {
       data,
       meta: { total, page, limit, pages },
     };
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  //  TRANSACTION AUDIT LOG (append-only AuditLog table)
+  // ════════════════════════════════════════════════════════════════════════════
+
+  async getTransactionAuditLogs(query: TransactionAuditQueryDto) {
+    const { billNumber, from, to, actorId, limit = 50 } = query;
+
+    const where: {
+      entityType: string;
+      billNumber?: string;
+      actorId?: string;
+      createdAt?: { gte?: Date; lte?: Date };
+    } = { entityType: 'Transaction' };
+
+    if (billNumber) where.billNumber = billNumber;
+    if (actorId) where.actorId = actorId;
+    if (from || to) {
+      where.createdAt = {};
+      if (from) where.createdAt.gte = new Date(from);
+      if (to) where.createdAt.lte = new Date(to);
+    }
+
+    const data = await this.prisma.auditLog.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+    });
+
+    return { data };
+  }
+
+  async getTransactionAuditByBillNumber(billNumber: string) {
+    const data = await this.prisma.auditLog.findMany({
+      where: { entityType: 'Transaction', billNumber },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    return { data };
   }
 }

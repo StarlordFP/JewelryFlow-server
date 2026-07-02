@@ -3,6 +3,7 @@ import {
   Get,
   Post,
   Patch,
+  Delete,
   Body,
   Param,
   Query,
@@ -29,10 +30,12 @@ import {
   StockQueryDto,
   CreateCategoryDto,    // ← add
   UpdateCategoryDto,    // ← add
+  BulkCreateStockDto,
 } from './dto/stock.dto';
 // import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { Roles } from '../common/decorators/roles.decorator';
+import { CurrentUser } from '../common/decorators/roles.decorator';
 
 @ApiTags('Stock')
 @ApiBearerAuth()
@@ -55,6 +58,36 @@ export class StockController {
   @ApiResponse({ status: 404, description: 'Category or metal type not found' })
   create(@Body() dto: CreateStockItemDto) {
     return this.stockService.createStockItem(dto);
+  }
+
+  /**
+   * POST /stock/bulk
+   * Bulk-add DIRECT stock items with category-karat SKUs.
+   */
+  @Post('bulk')
+  @Roles('OWNER', 'MANAGER')
+  @ApiOperation({ summary: 'Bulk add stock items', description: 'Create up to 100 DIRECT stock items in one atomic transaction' })
+  bulkCreate(@Body() dto: BulkCreateStockDto) {
+    return this.stockService.bulkCreateStock(dto);
+  }
+
+  /**
+   * GET /stock/sku-preview?categoryId=&metalTypeId=
+   * Read-only preview of the next SKU (does not consume sequence).
+   */
+  @Get('sku-preview')
+  @Roles('OWNER', 'MANAGER', 'STAFF')
+  @ApiOperation({ summary: 'Preview next category-karat SKU' })
+  @ApiQuery({ name: 'categoryId', required: true })
+  @ApiQuery({ name: 'metalTypeId', required: true })
+  skuPreview(
+    @Query('categoryId') categoryId: string,
+    @Query('metalTypeId') metalTypeId: string,
+  ) {
+    if (!categoryId || !metalTypeId) {
+      throw new BadRequestException('categoryId and metalTypeId are required');
+    }
+    return this.stockService.previewSku(categoryId, metalTypeId);
   }
 
   /**
@@ -217,8 +250,11 @@ getCategories() {
 @ApiOperation({ summary: 'Create category', description: 'Owner creates a new jewelry category e.g. Ring, Necklace, Bangle' })
 @ApiResponse({ status: 201, description: 'Category created' })
 @ApiResponse({ status: 409, description: 'Category name already exists' })
-createCategory(@Body() dto: CreateCategoryDto) {
-  return this.stockService.createCategory(dto.name);
+createCategory(
+  @CurrentUser('id') userId: string,
+  @Body() dto: CreateCategoryDto,
+) {
+  return this.stockService.createCategory(dto.name, dto.shortCode, userId);
 }
 
 /**
@@ -235,6 +271,18 @@ createCategory(@Body() dto: CreateCategoryDto) {
 @ApiResponse({ status: 409, description: 'Category name already exists' })
 updateCategory(@Param('id') id: string, @Body() dto: UpdateCategoryDto) {
   return this.stockService.updateCategory(id, dto);
+}
+
+/**
+ * DELETE /stock/categories/:id
+ * Permanently delete owner-created category with no stock items.
+ * Blocked when isProtected or stock items exist.
+ */
+@Delete('categories/:id')
+@Roles('OWNER')
+@ApiOperation({ summary: 'Delete category', description: 'Hard delete — blocked for protected categories or categories with stock' })
+deleteCategory(@Param('id') id: string) {
+  return this.stockService.deleteCategory(id);
 }
 
 /**

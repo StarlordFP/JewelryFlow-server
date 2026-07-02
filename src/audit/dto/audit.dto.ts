@@ -45,3 +45,32 @@ export class AuditQueryDto {
   @Min(1)
   limit?: number = 50;
 }
+
+export class TransactionAuditQueryDto {
+  @ApiPropertyOptional({ description: 'Filter by bill number' })
+  @IsOptional()
+  @IsString()
+  billNumber?: string;
+
+  @ApiPropertyOptional({ description: 'Filter by actor user id' })
+  @IsOptional()
+  @IsString()
+  actorId?: string;
+
+  @ApiPropertyOptional({ description: 'Start date (ISO date string)', example: '2026-01-01' })
+  @IsOptional()
+  @IsDateString()
+  from?: string;
+
+  @ApiPropertyOptional({ description: 'End date (ISO date string)', example: '2026-12-31' })
+  @IsOptional()
+  @IsDateString()
+  to?: string;
+
+  @ApiPropertyOptional({ description: 'Max results (default: 50)', default: 50 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  limit?: number = 50;
+}

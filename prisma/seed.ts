@@ -155,10 +155,20 @@ async function main() {
 
   console.log('  Creating item categories...');
   for (const name of categories) {
+    const shortCodes: Record<string, string> = {
+      Ring: 'RNG', Bangle: 'BNG', Necklace: 'NCK', Earring: 'EAR',
+      Bracelet: 'BRC', Pendant: 'PEN', Mala: 'MAL', Chain: 'CHN',
+      Haar: 'HAR', 'Silver Ring': 'SVR', 'Silver Bangle': 'SVB',
+      'Silver Necklace': 'SVN', 'Silver Payal': 'SVP', Uncategorised: 'UNC',
+    };
     await prisma.itemCategory.upsert({
-      where:  { name},
+      where:  { name },
       update: {},
-      create: { name},
+      create: {
+        name,
+        shortCode: shortCodes[name] ?? name.replace(/[^A-Za-z]/g, '').toUpperCase().slice(0, 3),
+        isProtected: true,
+      },
     });
   }
   console.log(`  ✓ ${categories.length} categories`);

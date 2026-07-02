@@ -27,6 +27,7 @@ enum TradeStatus {
 }
 
 enum StockItemOrigin {
+  DIRECT     // manual shop entry (POST /stock, POST /stock/bulk)
   PURCHASED
   KARIGAR
   TRADE
@@ -199,6 +200,7 @@ model MetalType {
   productionOrderLines ProductionOrderLine[]
   productionOrderMetalPools ProductionOrderMetalPool[]
   buybackRecords    BuybackRecord[]
+  categoryKaratSequences CategoryKaratSequence[]
 
   @@map("metal_types")
 }
@@ -269,16 +271,33 @@ model FetchedRateSnapshot {
 // ─── ITEM CATEGORY ────────────────────────────────────────────────────────────
 
 model ItemCategory {
-  id       String  @id @default(cuid())
-  name     String  @unique
-  isActive Boolean @default(true)
+  id              String  @id @default(cuid())
+  name            String  @unique
+  shortCode       String  @unique
+  isProtected     Boolean @default(false)
+  isActive        Boolean @default(true)
+  createdByUserId String?
 
-  stockItems    StockItem[]
-  jyalaRules    JyalaRule[]
-  jertyBrackets JertyBracket[]
+  stockItems           StockItem[]
+  jyalaRules           JyalaRule[]
+  jertyBrackets        JertyBracket[]
   productionOrderLines ProductionOrderLine[]
+  karatSequences       CategoryKaratSequence[]
 
   @@map("item_categories")
+}
+
+model CategoryKaratSequence {
+  id          String @id @default(cuid())
+  categoryId  String
+  metalTypeId String
+  lastSeq     Int    @default(0)
+
+  category  ItemCategory @relation(fields: [categoryId], references: [id])
+  metalType MetalType    @relation(fields: [metalTypeId], references: [id])
+
+  @@unique([categoryId, metalTypeId])
+  @@map("category_karat_sequences")
 }
 
 // ─── JYALA RULE ───────────────────────────────────────────────────────────────
@@ -950,6 +969,7 @@ model Transaction {
   paymentMethod   PaymentMethod   @default(CASH)
   subTotalNpr     Decimal         @db.Decimal(12, 2)
   discountNpr     Decimal         @default(0) @db.Decimal(12, 2)
+  roundingNpr     Decimal         @default(0) @db.Decimal(12, 2)
   grandTotalNpr   Decimal         @db.Decimal(12, 2)
   paidAmountNpr   Decimal         @default(0) @db.Decimal(12, 2)
   balanceNpr      Decimal         @default(0) @db.Decimal(12, 2)
@@ -1043,6 +1063,28 @@ model BuybackRecord {
   metalType   MetalType?  @relation(fields: [metalTypeId], references: [id])
 
   @@map("buyback_records")
+}
+
+// ─── AUDIT LOG ────────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  entityType String
+  entityId   String
+  billNumber String?
+  action     String
+  actorId    String?
+  actorName  String?
+  before     Json?
+  after      Json?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([entityType, entityId])
+  @@index([billNumber])
+  @@index([actorId])
+  @@index([createdAt])
+  @@map("audit_logs")
 }
 
 // ─── CONVERSATION LOG ─────────────────────────────────────────────────────────

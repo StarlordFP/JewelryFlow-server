@@ -128,10 +128,11 @@ export class SalesController {
   @HttpCode(HttpStatus.OK)
   @Roles('OWNER', 'MANAGER', 'STAFF')
   addPayment(
+    @CurrentUser('id') userId: string,
     @Param('id') id: string,
     @Body() dto: AddPaymentDto,
   ) {
-    return this.salesService.addPayment(id, dto);
+    return this.salesService.addPayment(userId, id, dto);
   }
 
   // ── READ ──────────────────────────────────────────────────────────────────
