@@ -127,6 +127,16 @@ export class CreateSellDto {
   @Type(() => PaymentDto)
   payment!: PaymentDto;
 
+  /**
+   * Bill-level discount in NPR (optional).
+   * Percent is a UI concern — client converts % to NPR before submit.
+   * Must be ≥ 0 and ≤ sum of line totals (subTotalNpr).
+   */
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  discountNpr?: number;
+
   @IsOptional()
   @IsString()
   @MaxLength(500)

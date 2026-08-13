@@ -12,7 +12,7 @@ import { BillNumberService } from './bill-number.service';
 import { WeightUtil, WeightValue } from '../common/utils/weight.util';
 import { GRAMS_PER_TOLA } from '../common/constants/weight.constants';
 import { Decimal } from '@prisma/client/runtime/library';
-import { randomBytes, createHash } from 'crypto';
+import { randomBytes } from 'crypto';
 import { writeTransactionAudit } from '../audit/write-transaction-audit';
 import { applyBillRounding, resolveRoundingUnit } from '../common/utils/bill-rounding.util';
 import {
@@ -62,6 +62,7 @@ export class SalesService {
       items,
       payment,
       notes,
+      discountNpr: discountInput,
     } = dto;
 
     return this.prisma.$transaction(async (tx) => {
@@ -74,17 +75,11 @@ export class SalesService {
       let resolvedCustomerId = customerId;
 
       if (!resolvedCustomerId && newCustomerName) {
-        let phoneHash = undefined;
-        let phoneHint = undefined;
-
         if (newCustomerPhone) {
           const normalised = newCustomerPhone.replace(/[\s\-()]/g, '');
-          phoneHash = createHash('sha256').update(normalised).digest('hex');
-          const digits = normalised.replace(/\D/g, '');
-          phoneHint = `****${digits.slice(-4)}`;
 
-          const existingCustomer = await tx.customer.findUnique({
-            where: { phoneHash },
+          const existingCustomer = await tx.customer.findFirst({
+            where: { phone: normalised },
           });
 
           if (existingCustomer) {
@@ -93,8 +88,7 @@ export class SalesService {
             const customer = await tx.customer.create({
               data: {
                 name: newCustomerName,
-                phoneHash,
-                phoneHint,
+                phone: normalised,
                 address: newCustomerAddress,
               },
             });
@@ -285,7 +279,14 @@ export class SalesService {
         });
       }
 
-      const discountNpr = new Decimal(0);
+      // ── Apply optional bill-level discount ──────────────────────────────
+      const discountNpr = new Decimal(discountInput ?? 0);
+      if (discountNpr.gt(subTotal)) {
+        throw new BadRequestException(
+          `Discount (NPR ${discountNpr.toFixed(2)}) cannot exceed subTotalNpr (NPR ${subTotal.toFixed(2)}).`,
+        );
+      }
+
       const preRoundingPayable = subTotal.minus(discountNpr);
       const roundingUnit = resolveRoundingUnit(stockItems.map((s) => s.metalType));
       const rounding = applyBillRounding(preRoundingPayable, roundingUnit);
@@ -361,6 +362,22 @@ export class SalesService {
           itemCount: lineData.length,
         },
       });
+
+      if (discountNpr.gt(0)) {
+        await writeTransactionAudit(tx, this.logger, {
+          entityId: txn.id,
+          billNumber: billNum,
+          action: 'DISCOUNT_APPLIED',
+          actorId: userId,
+          actorName,
+          after: {
+            discountNpr: discountNpr.toNumber(),
+            subTotalNpr: subTotal.toNumber(),
+            preRoundingPayable: preRoundingPayable.toNumber(),
+            grandTotalNpr: grandTotal.toNumber(),
+          },
+        });
+      }
 
       if (roundingNpr.gt(0)) {
         await writeTransactionAudit(tx, this.logger, {
@@ -1071,7 +1088,7 @@ export class SalesService {
         skip,
         take: limit,
         include: {
-          customer: { select: { id: true, name: true, phoneHint: true } },
+          customer: { select: { id: true, name: true, phone: true } },
           createdBy: { select: { id: true, name: true } },
           relatedTx: { select: { id: true, billNumber: true, txType: true } },
           buybackRecord: { select: { relatedSaleTxId: true } },
@@ -1135,7 +1152,7 @@ export class SalesService {
     const cat = await tx.itemCategory.upsert({
       where: { name: 'Old Gold' },
       update: {},
-      create: { name: 'Old Gold' },
+      create: { name: 'Old Gold', shortCode: 'OG' },
     });
     return cat.id;
   }
@@ -1249,7 +1266,7 @@ export class SalesService {
 
   private fullTxInclude() {
     return {
-      customer: { select: { id: true, name: true, phoneHint: true, address: true } },
+      customer: { select: { id: true, name: true, phone: true, address: true } },
       createdBy: { select: { id: true, name: true } },
       dailyRate: {
         include: { metalType: { select: { id: true, name: true } } },
@@ -1285,12 +1302,10 @@ export class SalesService {
   ): Promise<{ customerName: string | null; customerPhone: string | null; customerAddress: string | null }> {
     // If inline new customer fields are given, prefer them
     if (!customerId && newCustomerName) {
-      const normalised = newCustomerPhone?.replace(/[\s\-()]/g, '') ?? '';
-      const digits = normalised.replace(/\D/g, '');
-      const phoneHint = newCustomerPhone ? `****${digits.slice(-4)}` : null;
+      const normalised = newCustomerPhone?.replace(/[\s\-()]/g, '') ?? null;
       return {
         customerName:    newCustomerName,
-        customerPhone:   phoneHint,
+        customerPhone:   normalised,
         customerAddress: newCustomerAddress ?? null,
       };
     }
@@ -1301,7 +1316,7 @@ export class SalesService {
 
     const customer = await tx.customer.findUnique({
       where: { id: customerId },
-      select: { name: true, phoneHint: true, address: true },
+      select: { name: true, phone: true, address: true },
     });
 
     if (!customer) {
@@ -1310,7 +1325,7 @@ export class SalesService {
 
     return {
       customerName:    customer.name,
-      customerPhone:   customer.phoneHint ?? null,
+      customerPhone:   customer.phone ?? null,
       customerAddress: customer.address   ?? null,
     };
   }
@@ -1386,14 +1401,14 @@ export class SalesService {
       ? {
           ...txn.customer,
           name: txn.customerName ?? txn.customer.name,
-          phoneHint: txn.customerPhone ?? txn.customer.phoneHint,
+          phone: txn.customerPhone ?? txn.customer.phone,
           address: txn.customerAddress ?? txn.customer.address,
         }
       : txn.customerName
       ? {
           id: txn.customerId ?? null,
           name: txn.customerName,
-          phoneHint: txn.customerPhone,
+          phone: txn.customerPhone,
           address: txn.customerAddress,
         }
       : null;

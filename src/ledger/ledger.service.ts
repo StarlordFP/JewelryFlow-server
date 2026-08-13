@@ -503,7 +503,7 @@ export class LedgerService {
         select: {
           id:        true,
           name:      true,
-          phoneHint: true,
+          phone:     true,
           isActive:  true,
           createdAt: true,
         },

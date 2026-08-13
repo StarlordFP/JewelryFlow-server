@@ -3,7 +3,6 @@ import {
   NotFoundException,
   ConflictException,
 } from '@nestjs/common';
-import { createHash } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { WeightUtil } from '../common/utils/weight.util';
 import {
@@ -18,43 +17,12 @@ export class CustomerService {
   constructor(private readonly prisma: PrismaService) {}
 
   // ════════════════════════════════════════════════════════════════════════════
-  //  PHONE HELPERS
-  // ════════════════════════════════════════════════════════════════════════════
-
-  /**
-   * Normalise + hash a raw phone number.
-   * Strips spaces, dashes, and brackets before hashing so
-   * "+977-9841 123456" and "9841123456" hash identically.
-   */
-  private normalisePhone(raw: string): string {
-    return raw.replace(/[\s\-()]/g, '');
-  }
-
-  private hashPhone(normalised: string): string {
-    return createHash('sha256').update(normalised).digest('hex');
-  }
-
-  /** Returns last 4 digits for display ("****1234") */
-  private phoneHint(normalised: string): string {
-    const digits = normalised.replace(/\D/g, '');
-    return `****${digits.slice(-4)}`;
-  }
-
-  private preparePhoneFields(raw: string) {
-    const normalised = this.normalisePhone(raw);
-    return {
-      phoneHash: this.hashPhone(normalised),
-      phoneHint: this.phoneHint(normalised),
-    };
-  }
-
-  // ════════════════════════════════════════════════════════════════════════════
   //  CRUD
   // ════════════════════════════════════════════════════════════════════════════
 
   /**
    * Create a customer.
-   * Phone uniqueness is enforced on the SHA-256 hash column.
+   * Phone uniqueness is enforced on the plaintext phone column.
    */
   async create(dto: CreateCustomerDto) {
     const data: any = {
@@ -64,20 +32,19 @@ export class CustomerService {
     };
 
     if (dto.phone) {
-      const fields = this.preparePhoneFields(dto.phone);
+      const normalised = dto.phone.trim();
 
       // Check uniqueness before insert for a clear error message
-      const existing = await this.prisma.customer.findUnique({
-        where: { phoneHash: fields.phoneHash },
+      const existing = await this.prisma.customer.findFirst({
+        where: { phone: normalised },
       });
       if (existing) {
         throw new ConflictException(
-          `A customer with phone ending in ${fields.phoneHint} already exists`,
+          `A customer with phone ${normalised} already exists`,
         );
       }
 
-      data.phoneHash = fields.phoneHash;
-      data.phoneHint = fields.phoneHint;
+      data.phone = normalised;
     }
 
     return this.prisma.customer.create({ data });
@@ -94,7 +61,7 @@ export class CustomerService {
     if (search) {
       where.OR = [
         { name: { contains: search, mode: 'insensitive' } },
-        { phoneHint: { contains: search } },
+        { phone: { contains: search } },
       ];
     }
 
@@ -107,7 +74,7 @@ export class CustomerService {
         select: {
           id: true,
           name: true,
-          phoneHint: true,  // never return phoneHash
+          phone: true,
           address: true,
           notes: true,
           isActive: true,
@@ -130,7 +97,7 @@ export class CustomerService {
       select: {
         id: true,
         name: true,
-        phoneHint: true,
+        phone: true,
         address: true,
         notes: true,
         isActive: true,
@@ -145,18 +112,17 @@ export class CustomerService {
   }
 
   /**
-   * Lookup by raw phone number.
-   * Hashes the input and queries on phoneHash for a constant-time comparison.
+   * Lookup by raw phone number — plain string match.
    */
   async findByPhone(dto: PhoneLookupDto) {
-    const { phoneHash } = this.preparePhoneFields(dto.phone);
+    const normalised = dto.phone.trim();
 
-    const customer = await this.prisma.customer.findUnique({
-      where: { phoneHash },
+    const customer = await this.prisma.customer.findFirst({
+      where: { phone: normalised },
       select: {
         id: true,
         name: true,
-        phoneHint: true,
+        phone: true,
         address: true,
         isActive: true,
         createdAt: true,
@@ -177,21 +143,25 @@ export class CustomerService {
     if (dto.notes !== undefined) data.notes = dto.notes;
     if (dto.isActive !== undefined) data.isActive = dto.isActive;
 
-    // Phone update: re-hash the new number, check uniqueness
-    if (dto.phone) {
-      const fields = this.preparePhoneFields(dto.phone);
+    // Phone update: plain string uniqueness check
+    if (dto.phone !== undefined) {
+      if (dto.phone) {
+        const normalised = dto.phone.trim();
 
-      const conflict = await this.prisma.customer.findFirst({
-        where: { phoneHash: fields.phoneHash, NOT: { id } },
-      });
-      if (conflict) {
-        throw new ConflictException(
-          `Another customer already uses phone ending in ${fields.phoneHint}`,
-        );
+        const conflict = await this.prisma.customer.findFirst({
+          where: { phone: normalised, NOT: { id } },
+        });
+        if (conflict) {
+          throw new ConflictException(
+            `Another customer already uses phone ${normalised}`,
+          );
+        }
+
+        data.phone = normalised;
+      } else {
+        // Allow clearing the phone number
+        data.phone = null;
       }
-
-      data.phoneHash = fields.phoneHash;
-      data.phoneHint = fields.phoneHint;
     }
 
     return this.prisma.customer.update({
@@ -200,7 +170,7 @@ export class CustomerService {
       select: {
         id: true,
         name: true,
-        phoneHint: true,
+        phone: true,
         address: true,
         notes: true,
         isActive: true,

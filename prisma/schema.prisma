@@ -936,8 +936,9 @@ model ProductionOrderMetalPool {
 model Customer {
   id        String   @id @default(cuid())
   name      String
-  phoneHash String?  @unique
-  phoneHint String?
+  phone     String?  // plaintext phone — primary phone field going forward
+  phoneHash String?  // legacy hashed phone — no longer written, kept for existing data
+  phoneHint String?  // legacy phone hint — no longer written, kept for existing data
   address   String?
   notes     String?
   isActive  Boolean  @default(true)
@@ -948,6 +949,7 @@ model Customer {
   buybackRecords BuybackRecord[]
 
   @@index([name])
+  @@index([phone])
   @@index([isActive])
   @@map("customers")
 }
@@ -1098,4 +1100,20 @@ model ConversationLog {
   createdAt DateTime @default(now())
 
   @@map("conversation_logs")
+}
+
+// ─── INTEGRITY ALERT ──────────────────────────────────────────────────────────
+
+model IntegrityAlert {
+  id         String    @id @default(cuid())
+  checkName  String
+  severity   String
+  message    String
+  detectedAt DateTime  @default(now())
+  resolvedAt DateTime?
+  resolvedBy String?
+
+  @@index([detectedAt(sort: Desc)])
+  @@index([resolvedAt])
+  @@map("integrity_alerts")
 }

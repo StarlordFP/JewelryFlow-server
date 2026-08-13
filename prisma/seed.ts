@@ -1,6 +1,15 @@
 import { PrismaClient } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
-import { createHash } from 'crypto';
+import { isDevOrTestDatabase, maskDatabaseUrl } from '../src/common/integrity/database-url.util';
+
+const dbUrl = process.env.DATABASE_URL ?? '';
+if (!isDevOrTestDatabase(dbUrl) && process.env.ALLOW_SEED_ON_PROD !== 'true') {
+  console.error('❌ SEED BLOCKED: DATABASE_URL does not look like a dev/test database.');
+  console.error('   URL:', maskDatabaseUrl(dbUrl));
+  console.error('   If you really want to seed this database, set:');
+  console.error('   ALLOW_SEED_ON_PROD=true npm run db:seed');
+  process.exit(1);
+}
 
 const prisma = new PrismaClient();
 
@@ -280,10 +289,6 @@ console.log('  ✓ Sample rates seeded (sell + buy rates)');
 
 // ─── IDEMPOTENT DEMO SEED HELPERS ─────────────────────────────────────────────
 
-function hashPhone(phone: string): string {
-  return createHash('sha256').update(phone).digest('hex');
-}
-
 async function upsertSupplier(data: { name: string; phone: string; address: string; supplierType: 'DIRECT' | 'TRADE' }) {
   const existing = await prisma.supplier.findFirst({ where: { name: data.name } });
   if (existing) {
@@ -299,21 +304,22 @@ async function upsertSupplier(data: { name: string; phone: string; address: stri
 }
 
 async function upsertCustomer(data: { name: string; phone: string; address: string; notes?: string }) {
-  const phoneHash = hashPhone(data.phone);
-  const phoneHint = `${data.phone.substring(0, 2)}****${data.phone.substring(data.phone.length - 2)}`;
-  
-  return prisma.customer.upsert({
-    where: { phoneHash },
-    update: {
+  const existing = await prisma.customer.findFirst({ where: { phone: data.phone } });
+  if (existing) {
+    return prisma.customer.update({
+      where: { id: existing.id },
+      data: {
+        name: data.name,
+        phone: data.phone,
+        address: data.address,
+        notes: data.notes,
+      },
+    });
+  }
+  return prisma.customer.create({
+    data: {
       name: data.name,
-      phoneHint,
-      address: data.address,
-      notes: data.notes,
-    },
-    create: {
-      name: data.name,
-      phoneHash,
-      phoneHint,
+      phone: data.phone,
       address: data.address,
       notes: data.notes,
     },
@@ -459,7 +465,10 @@ async function upsertPurchaseOrder(
       ...poData,
       notes,
       lines: {
-        create: linesData,
+        create: linesData.map((line) => ({
+          ...line,
+          itemName: line.itemName ?? line.description,
+        })),
       },
     },
   });

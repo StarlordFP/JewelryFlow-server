@@ -6,6 +6,10 @@ NestJS API for the JewelryFlow ERP.
 
 - **Backup:** `npm run db:backup` — saves to `server/backups/`
 - **Restore:** `npm run db:restore backups/jewelryflow-backup-<timestamp>.sql`
+- **Migrate:** `npm run db:migrate` — runs backup first, then `prisma migrate dev`
+- **Reset (test DB only):** `npm run db:reset` — never run `npx prisma migrate reset` directly; use the safe wrapper with confirmations
+- **Integrity check:** `npm run db:integrity-check` — compares row counts to baseline and runs consistency checks
+- **Update baseline:** `npm run db:integrity-baseline` — records current row counts to `server/data/integrity-baseline.json`
 - **Test DB setup:** `npm run db:test:create` then `npm run db:test:setup` — creates `jewelryflow_test` for integration tests
 - **NEVER** run `npm run test:integration` without `.env.test` configured — integration tests run destructive cleanup on their target database
 

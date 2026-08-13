@@ -1,0 +1,9 @@
+{
+  "transactions": 14,
+  "stock_items": 17,
+  "customers": 24,
+  "karigars": 4,
+  "production_orders": 5,
+  "daily_rates": 463,
+  "audit_logs": 2
+}

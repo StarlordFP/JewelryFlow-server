@@ -5,6 +5,8 @@ import { ScheduleModule } from '@nestjs/schedule';
 import { PassportModule } from '@nestjs/passport';
 import { JwtModule } from '@nestjs/jwt';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { ServeStaticModule } from '@nestjs/serve-static';
+import { join } from 'path';
 import { AuthModule } from './auth/auth.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { StockModule } from './stock/stock.module';
@@ -20,6 +22,9 @@ import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { LedgerModule } from './ledger/ledger.module';
 import { AuditModule } from './audit/audit.module';
+import { IntegrityModule } from './integrity/integrity.module';
+import { ExportModule } from './export/export.module';
+import { ImportModule } from './import/import.module';
 
 @Module({
   imports: [
@@ -57,6 +62,18 @@ import { AuditModule } from './audit/audit.module';
     DashboardModule,
     LedgerModule,
     AuditModule,
+    IntegrityModule,
+    ExportModule,
+    ImportModule,
+
+    ServeStaticModule.forRoot({
+      rootPath: join(__dirname, '..', '..', 'client', 'dist'),
+      exclude: ['/api/(.*)'],
+      serveStaticOptions: {
+        fallthrough: false,
+      },
+      renderPath: '/*',
+    }),
   ],
 
   providers: [

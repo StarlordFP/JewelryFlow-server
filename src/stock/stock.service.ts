@@ -7,6 +7,7 @@ import {
 import { PrismaService } from '../prisma/prisma.service';
 import { StockSkuService } from './stock-sku.service';
 import { WeightUtil } from '../common/utils/weight.util';
+import { GRAMS_PER_TOLA } from '../common/constants/weight.constants';
 import { isGoldMetal } from '../common/utils/metal.util';
 import { Decimal } from '@prisma/client/runtime/library';
 import {
@@ -84,6 +85,13 @@ interface CustomerBillView {
   luxuryTax:  string | null;
   vat:        string | null;
   grandTotal: string;
+}
+
+export interface WeightRow {
+  karat?: number | null;
+  metalTypeName: string;
+  totalGram:  number;
+  totalTola:  number;
 }
 
 @Injectable()
@@ -1015,6 +1023,119 @@ export class StockService {
         },
       },
       data: rows,
+    };
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  //  WEIGHT SUMMARY
+  // ════════════════════════════════════════════════════════════════════════════
+
+  /**
+   * Returns total gross weight of IN_STOCK items grouped by metal type.
+   * Gold rows are further broken down by karat, sorted 24K → 14K.
+   * Uses a single groupBy + single metalType lookup (no N+1 queries).
+   */
+  async getStockWeightSummary() {
+    // ── 1. Group items by metalTypeId + karat, sum grossWeightGram ───────────
+    const groups = await this.prisma.stockItem.groupBy({
+      by: ['metalTypeId', 'karat'],
+      where: { status: 'IN_STOCK', metalTypeId: { not: null } },
+      _sum: { grossWeightGram: true },
+    });
+
+    if (groups.length === 0) {
+      return {
+        gold:           [],
+        silver:         [],
+        goldTotalGram:  0,
+        goldTotalTola:  0,
+        silverTotalGram: 0,
+        silverTotalTola: 0,
+      };
+    }
+
+    // ── 2. Fetch all relevant metal type names in one query ──────────────────
+    const metalTypeIds = [...new Set(groups.map((g) => g.metalTypeId as string))];
+    const metalTypes   = await this.prisma.metalType.findMany({
+      where: { id: { in: metalTypeIds } },
+      select: { id: true, name: true },
+    });
+    const metalTypeMap = new Map(metalTypes.map((m) => [m.id, m.name]));
+
+    // ── 3. Classify and group into gold / silver buckets in memory ───────────
+    const goldMap = new Map<string, WeightRow>();
+    const silverMap = new Map<string, WeightRow>();
+
+    for (const group of groups) {
+      const metalName  = metalTypeMap.get(group.metalTypeId as string) ?? 'Unknown';
+      const totalGram  = Number(group._sum.grossWeightGram ?? 0);
+
+      if (metalName.toLowerCase().includes('gold')) {
+        // Infer karat from name if null
+        let karat = group.karat;
+        if (karat === null) {
+          const match = metalName.match(/(\d+)\s*K/i);
+          if (match) {
+            karat = parseInt(match[1], 10);
+          }
+        }
+        
+        const key = karat !== null ? `${karat}K` : 'Unknown';
+        const existing = goldMap.get(key);
+        if (existing) {
+          existing.totalGram += totalGram;
+        } else {
+          goldMap.set(key, {
+            karat,
+            metalTypeName: metalName,
+            totalGram,
+            totalTola: 0,
+          });
+        }
+      } else if (metalName.toLowerCase().includes('silver')) {
+        const key = metalName;
+        const existing = silverMap.get(key);
+        if (existing) {
+          existing.totalGram += totalGram;
+        } else {
+          silverMap.set(key, {
+            metalTypeName: metalName,
+            totalGram,
+            totalTola: 0,
+          });
+        }
+      }
+    }
+
+    // Convert Map values to arrays, calculate tolas and format
+    const goldRows = Array.from(goldMap.values()).map((r) => {
+      r.totalGram = parseFloat(r.totalGram.toFixed(4));
+      r.totalTola = parseFloat((r.totalGram / GRAMS_PER_TOLA).toFixed(4));
+      return r;
+    });
+
+    const silverRows = Array.from(silverMap.values()).map((r) => {
+      r.totalGram = parseFloat(r.totalGram.toFixed(4));
+      r.totalTola = parseFloat((r.totalGram / GRAMS_PER_TOLA).toFixed(4));
+      return r;
+    });
+
+    // ── 4. Sort gold rows: highest karat first (24 → 22 → 18 → 14 → null) ───
+    goldRows.sort((a, b) => (b.karat ?? -1) - (a.karat ?? -1));
+
+    // ── 5. Compute totals ────────────────────────────────────────────────────
+    const goldTotalGram  = parseFloat(goldRows.reduce((s, r) => s + r.totalGram, 0).toFixed(4));
+    const goldTotalTola  = parseFloat((goldTotalGram / GRAMS_PER_TOLA).toFixed(4));
+    const silverTotalGram = parseFloat(silverRows.reduce((s, r) => s + r.totalGram, 0).toFixed(4));
+    const silverTotalTola = parseFloat((silverTotalGram / GRAMS_PER_TOLA).toFixed(4));
+
+    return {
+      gold:            goldRows,
+      silver:          silverRows,
+      goldTotalGram,
+      goldTotalTola,
+      silverTotalGram,
+      silverTotalTola,
     };
   }
 

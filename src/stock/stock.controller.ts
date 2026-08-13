@@ -303,10 +303,31 @@ deactivateCategory(@Param('id') id: string) {
 }
 
   /**
+   * GET /stock/weight-summary
+   * Returns total gross weight of IN_STOCK items grouped by metal type / karat.
+   * Placed BEFORE :id route to avoid NestJS treating "weight-summary" as an id.
+   * Roles: OWNER, MANAGER, STAFF
+   */
+  @Get('weight-summary')
+  @Roles('OWNER', 'MANAGER', 'STAFF')
+  @ApiOperation({
+    summary: 'Stock weight summary',
+    description:
+      'Total gross weight of IN_STOCK items grouped by metal type. ' +
+      'Gold is further broken down by karat (24K, 22K, 18K, 14K). ' +
+      'Weights are returned in both grams and tola.',
+  })
+  @ApiResponse({ status: 200, description: 'Weight summary retrieved successfully' })
+  weightSummary() {
+    return this.stockService.getStockWeightSummary();
+  }
+
+  /**
    * GET /stock/:id
    * Full detail of one stock item including addons and origin trace.
    */
   @Get(':id')
+
   @Roles('OWNER', 'MANAGER', 'STAFF')
   @ApiOperation({ summary: 'Get stock item details', description: 'Full detail of one stock item including addons and origin trace' })
   @ApiParam({ name: 'id', description: 'Stock item ID' })
