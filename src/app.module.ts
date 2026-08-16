@@ -25,6 +25,7 @@ import { AuditModule } from './audit/audit.module';
 import { IntegrityModule } from './integrity/integrity.module';
 import { ExportModule } from './export/export.module';
 import { ImportModule } from './import/import.module';
+import { AppController } from './app.controller';
 
 @Module({
   imports: [
@@ -75,6 +76,8 @@ import { ImportModule } from './import/import.module';
       renderPath: '/*',
     }),
   ],
+
+  controllers: [AppController],
 
   providers: [
     { provide: APP_FILTER,       useClass: HttpExceptionFilter },
