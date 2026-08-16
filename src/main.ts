@@ -17,6 +17,9 @@ async function bootstrap() {
     }),
   );
 
+  // Static UI: served via ServeStaticModule in AppModule only when
+  // NODE_ENV !== 'production'. Production (e.g. Render) is API-only.
+
   app.setGlobalPrefix('api/v1');
 
   app.useGlobalPipes(

@@ -67,16 +67,20 @@ import { AppController } from './app.controller';
     ExportModule,
     ImportModule,
 
-    ServeStaticModule.forRoot({
-      rootPath: join(__dirname, '..', '..', 'client', 'dist'),
-      exclude: ['/api/(.*)'],
-      serveStaticOptions: {
-        fallthrough: false,
-      },
-      renderPath: '/*',
-    }),
+    // Local / monorepo only — Render (production) is API-only; client is deployed separately.
+    ...(process.env.NODE_ENV !== 'production'
+      ? [
+          ServeStaticModule.forRoot({
+            rootPath: join(__dirname, '..', '..', 'client', 'dist'),
+            exclude: ['/api/(.*)'],
+            serveStaticOptions: {
+              fallthrough: false,
+            },
+            renderPath: '/*',
+          }),
+        ]
+      : []),
   ],
-
   controllers: [AppController],
 
   providers: [
