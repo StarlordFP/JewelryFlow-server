@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe, Logger } from '@nestjs/common';
+import { ValidationPipe, Logger, RequestMethod } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
@@ -20,7 +20,10 @@ async function bootstrap() {
   // Static UI: served via ServeStaticModule in AppModule only when
   // NODE_ENV !== 'production'. Production (e.g. Render) is API-only.
 
-  app.setGlobalPrefix('api/v1');
+  // Keep API under /api/v1, but leave /health unprefixed for Render health checks.
+  app.setGlobalPrefix('api/v1', {
+    exclude: [{ path: 'health', method: RequestMethod.GET }],
+  });
 
   app.useGlobalPipes(
     new ValidationPipe({
