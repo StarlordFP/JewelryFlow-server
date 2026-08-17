@@ -26,6 +26,9 @@ import {
   DEFAULT_BUY_DISCOUNT_PCT,
 } from './rates.constants';
 
+/** Supabase / remote DB latency — default Prisma interactive tx timeout (5s) is too short. */
+const REMOTE_TX = { maxWait: 15_000, timeout: 60_000 } as const;
+
 @Injectable()
 export class RatesService {
   constructor(private readonly prisma: PrismaService) {}
@@ -125,7 +128,7 @@ export class RatesService {
       });
 
       return this.formatRate(rate);
-    });
+    }, REMOTE_TX);
   }
 
   /**
@@ -221,7 +224,7 @@ export class RatesService {
         base:    `24K sell: NPR ${baseSellTolaFormatted}/tola`,
         rates:   results,
       };
-    });
+    }, REMOTE_TX);
   }
 
 
@@ -635,7 +638,7 @@ export class RatesService {
         rates: results,
         snapshotId: dto.snapshotId ?? null,
       };
-    });
+    }, REMOTE_TX);
   }
 
 }

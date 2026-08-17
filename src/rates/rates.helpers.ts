@@ -53,18 +53,20 @@ export async function expireAndCreateDailyRate(
     data: { isCurrent: false },
   });
 
-  const sellRatePerTola = sellRatePerGram.mul(GRAMS_PER_TOLA);
-  const sellRatePerLal = sellRatePerGram.mul(GRAMS_PER_LAL);
-  const buyRatePerTola = buyRatePerGram.mul(GRAMS_PER_TOLA);
-  const buyRatePerLal = buyRatePerGram.mul(GRAMS_PER_LAL);
+  const sellG = roundRate(sellRatePerGram);
+  const buyG = roundRate(buyRatePerGram);
+  const sellRatePerTola = roundRate(sellG.mul(GRAMS_PER_TOLA));
+  const sellRatePerLal = roundRate(sellG.mul(GRAMS_PER_LAL));
+  const buyRatePerTola = roundRate(buyG.mul(GRAMS_PER_TOLA));
+  const buyRatePerLal = roundRate(buyG.mul(GRAMS_PER_LAL));
 
   return tx.dailyRate.create({
     data: {
       metalTypeId,
-      sellRatePerGram,
+      sellRatePerGram: sellG,
       sellRatePerTola,
       sellRatePerLal,
-      buyRatePerGram,
+      buyRatePerGram: buyG,
       buyRatePerTola,
       buyRatePerLal,
       isCurrent: true,

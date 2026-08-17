@@ -58,6 +58,14 @@ export class HttpExceptionFilter implements ExceptionFilter {
         error = 'Not Found';
         message = 'Record not found';
       }
+      // Interactive transaction timeout (common on remote Supabase)
+      else if ((exception as any).code === 'P2028') {
+        status = HttpStatus.GATEWAY_TIMEOUT;
+        error = 'Transaction Timeout';
+        message =
+          'Database transaction timed out. Please try Confirm again — the server may be waking up.';
+        this.logger.error(exception.message, exception.stack);
+      }
       // Log unexpected errors
       else {
         this.logger.error(exception.message, exception.stack);
