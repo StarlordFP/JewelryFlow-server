@@ -94,6 +94,25 @@ describe('FenegosidaScrapeProvider parseFenegosidaApiToday', () => {
     expect(result.nepaliDateLabel).toBe('2026-08-17');
   });
 
+  it('prefers Nepali rateType labels for per-10g rows', () => {
+    const result = parseFenegosidaApiToday([
+      {
+        id: 1,
+        todayDate: '2026-08-17T00:00:00.000Z',
+        rateType: 'असली चाँदी दर (१० ग्राम)',
+        todayBaseRatePerGram: 4089.5,
+      },
+      {
+        id: 2,
+        todayDate: '2026-08-17T00:00:00.000Z',
+        rateType: 'छापावाल सुन (१० ग्राम)',
+        todayBaseRatePerGram: 263030,
+      },
+    ]);
+    expect(result.fineGoldPer10g).toBe(263030);
+    expect(result.silverPer10g).toBe(4089.5);
+  });
+
   it('pairTolaAndPer10g matches 306800 tola → 263030 per 10g', () => {
     const paired = pairTolaAndPer10g([306800, 263030, 4770, 4089.5]);
     expect(paired.goldPer10g).toBe(263030);

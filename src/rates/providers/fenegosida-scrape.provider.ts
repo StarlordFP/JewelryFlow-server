@@ -9,8 +9,9 @@ const FENEGOSIDA_API_TODAY =
   'https://api.fenegosida.org/api/website/v1/Dashboard/today';
 /** Legacy HTML homepage (kept as fallback if API shape changes). */
 const FENEGOSIDA_HTML_URL = 'https://www.fenegosida.org/';
+/** Browser-like UA — some CDNs block unknown bots from datacenter IPs (e.g. Render). */
 const USER_AGENT =
-  'JewelryFlow-ERP/1.0 (+https://jewelryflow.local; daily-rate-fetch)';
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
 /** 1 tola = 11.664 g — FENEGOSIDA often publishes both per-tola and per-10g. */
 const GRAMS_PER_TOLA = 11.664;
@@ -60,14 +61,32 @@ export function parseFenegosidaApiToday(rows: unknown): FetchedTodayRates {
     };
   }
 
-  const values = (rows as DashboardTodayRow[])
+  const list = rows as DashboardTodayRow[];
+  const dateRaw = list.find((r) => r.todayDate)?.todayDate;
+  const nepaliDateLabel = dateRaw ? String(dateRaw).slice(0, 10) : null;
+
+  // Prefer explicit rateType labels from live API (Nepali), e.g.
+  // "छापावाल सुन (१० ग्राम)" / "असली चाँदी दर (१० ग्राम)"
+  const labeledGold10 = pickLabeledPer10g(list, /सुन|gold/i);
+  const labeledSilver10 = pickLabeledPer10g(list, /चाँदी|चांदी|silver/i);
+
+  if (labeledGold10 != null || labeledSilver10 != null) {
+    return {
+      fineGoldPer10g: labeledGold10,
+      tejabiGoldPer10g: null,
+      silverPer10g: labeledSilver10,
+      nepaliDateLabel,
+      rawSnippet: JSON.stringify(rows).slice(0, 2000),
+    };
+  }
+
+  // Fallback: pair tola ↔ per-10g by 10/11.664 ratio
+  const values = list
     .map((r) => Number(r.todayBaseRatePerGram))
     .filter((n) => Number.isFinite(n) && n > 0)
     .sort((a, b) => b - a);
 
   const { goldPer10g, silverPer10g } = pairTolaAndPer10g(values);
-  const dateRaw = (rows as DashboardTodayRow[]).find((r) => r.todayDate)?.todayDate;
-  const nepaliDateLabel = dateRaw ? String(dateRaw).slice(0, 10) : null;
 
   return {
     fineGoldPer10g: goldPer10g,
@@ -76,6 +95,35 @@ export function parseFenegosidaApiToday(rows: unknown): FetchedTodayRates {
     nepaliDateLabel,
     rawSnippet: JSON.stringify(rows).slice(0, 2000),
   };
+}
+
+/** Pick the per-10-gram row for a metal (rateType contains "१० ग्राम" / "10 ग"). */
+function pickLabeledPer10g(
+  rows: DashboardTodayRow[],
+  metalPattern: RegExp,
+): number | null {
+  const per10 = rows.find((r) => {
+    const label = String(r.rateType ?? '');
+    if (!metalPattern.test(label)) return false;
+    return /१०\s*ग्राम|10\s*ग|10\s*gr/i.test(label);
+  });
+  if (per10 != null) {
+    const n = Number(per10.todayBaseRatePerGram);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  }
+  // If only per-tola labeled row exists, convert to per 10g
+  const perTola = rows.find((r) => {
+    const label = String(r.rateType ?? '');
+    if (!metalPattern.test(label)) return false;
+    return /१\s*तोला|1\s*tola|तोला/i.test(label);
+  });
+  if (perTola != null) {
+    const n = Number(perTola.todayBaseRatePerGram);
+    if (Number.isFinite(n) && n > 0) {
+      return Number((n * TOLA_TO_PER_10G).toFixed(2));
+    }
+  }
+  return null;
 }
 
 /**
@@ -210,8 +258,10 @@ export class FenegosidaScrapeProvider implements IRateSourceProvider {
         headers: {
           'User-Agent': USER_AGENT,
           Accept: 'application/json',
+          Origin: 'https://www.fenegosida.org',
+          Referer: 'https://www.fenegosida.org/',
         },
-        signal: AbortSignal.timeout(30_000),
+        signal: AbortSignal.timeout(60_000),
       });
 
       if (!response.ok) {
@@ -242,7 +292,7 @@ export class FenegosidaScrapeProvider implements IRateSourceProvider {
     try {
       const response = await this.fetchFn(FENEGOSIDA_HTML_URL, {
         headers: { 'User-Agent': USER_AGENT, Accept: 'text/html' },
-        signal: AbortSignal.timeout(30_000),
+        signal: AbortSignal.timeout(60_000),
       });
 
       if (!response.ok) {
