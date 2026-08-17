@@ -1,4 +1,8 @@
-import { parseFenegosidaHtml } from './fenegosida-scrape.provider';
+import {
+  parseFenegosidaHtml,
+  parseFenegosidaApiToday,
+  pairTolaAndPer10g,
+} from './fenegosida-scrape.provider';
 
 /** Genuine live FENEGOSIDA layout (Jun 2026) — label per 10 grm Nrs value/- */
 const LIVE_SNIPPET_JUN_2026 =
@@ -7,6 +11,14 @@ const LIVE_SNIPPET_JUN_2026 =
 /** Swapped numeric shapes — decimal on gold, whole number on silver */
 const SWAPPED_SHAPES_SNIPPET =
   'FINE GOLD (9999) per 10 grm Nrs 185000.75/- TEJABI GOLD per 10 grm Nrs 0/- SILVER per 10 grm Nrs 1450/-';
+
+/** Live API shape Aug 2026 — tola + per-10g pairs (field name is misleading). */
+const LIVE_API_TODAY_AUG_2026 = [
+  { id: 152, todayDate: '2026-08-17T05:44:55.651+00:00', todayBaseRatePerGram: 4770.0 },
+  { id: 153, todayDate: '2026-08-17T05:44:55.651+00:00', todayBaseRatePerGram: 4089.5 },
+  { id: 154, todayDate: '2026-08-17T05:44:55.651+00:00', todayBaseRatePerGram: 306800.0 },
+  { id: 155, todayDate: '2026-08-17T05:44:55.651+00:00', todayBaseRatePerGram: 263030.0 },
+];
 
 describe('FenegosidaScrapeProvider parseFenegosidaHtml', () => {
   const legacyHtml = `
@@ -63,5 +75,28 @@ describe('FenegosidaScrapeProvider parseFenegosidaHtml', () => {
     expect(result.fineGoldPer10g).toBeNull();
     expect(result.silverPer10g).toBeNull();
     expect(result.nepaliDateLabel).toBeNull();
+  });
+
+  it('returns nulls on SPA shell HTML (no rate text)', () => {
+    const spa =
+      '<!doctype html><html><body><div id="root"></div><script src="/assets/index.js"></script></body></html>';
+    const result = parseFenegosidaHtml(spa);
+    expect(result.fineGoldPer10g).toBeNull();
+    expect(result.silverPer10g).toBeNull();
+  });
+});
+
+describe('FenegosidaScrapeProvider parseFenegosidaApiToday', () => {
+  it('pairs tola + per-10g rows into fine gold and silver per 10g', () => {
+    const result = parseFenegosidaApiToday(LIVE_API_TODAY_AUG_2026);
+    expect(result.fineGoldPer10g).toBe(263030);
+    expect(result.silverPer10g).toBe(4089.5);
+    expect(result.nepaliDateLabel).toBe('2026-08-17');
+  });
+
+  it('pairTolaAndPer10g matches 306800 tola → 263030 per 10g', () => {
+    const paired = pairTolaAndPer10g([306800, 263030, 4770, 4089.5]);
+    expect(paired.goldPer10g).toBe(263030);
+    expect(paired.silverPer10g).toBe(4089.5);
   });
 });

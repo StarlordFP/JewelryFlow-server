@@ -34,13 +34,19 @@ async function bootstrap() {
     }),
   );
 
-  // ── CORS — driven by env, not hardcoded ──────────────────────────────────
-  const rawOrigins = process.env.ALLOWED_ORIGINS?.split(',').filter(Boolean);
+  // ── CORS — browser frontends only (Flutter does not use CORS) ────────────
+  // Prefer ALLOWED_ORIGINS on Render; fallback covers local Vite/CRA + Vercel.
+  const rawOrigins = process.env.ALLOWED_ORIGINS?.split(',')
+    .map((o) => o.trim())
+    .filter(Boolean);
   const allowedOrigins = rawOrigins?.length
     ? rawOrigins
-    : ['http://localhost:5173', 'http://localhost:3000'];
-  // ^ local install fallback — frontend dev ports. In production,
-  // ALLOWED_ORIGINS must be set to the actual deployed frontend URL.
+    : [
+        'http://localhost:5173',
+        'http://localhost:3000',
+        'http://localhost:4200',
+        'https://jewelryflow.vercel.app',
+      ];
   app.enableCors({
     origin: allowedOrigins,
     credentials: true,
